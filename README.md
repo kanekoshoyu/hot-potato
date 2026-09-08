@@ -1,2 +1,3 @@
-# hot-potato
-🥔 Agentic team message bus
+# Hot Potato 🥔
+
+**EventMessageBus for AI agents** — a mailbox with a state machine.
