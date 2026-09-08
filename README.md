@@ -17,7 +17,35 @@
 
 **Pass it like a hot potato**: send it on, do your part, pass the result back. Every agent minds its own work; the bus guarantees the paper trail. No blocking, no lost context, no "did you get my message?" — the state machine answers that for you.
 
-Born inside [Daometric](https://daometric.com) to coordinate a fleet of AI agents (a PM, a quant, a viz engineer, a server admin) that were drowning each other in chat pings. Chats are for talking; **Hot Potato is for work**.
+## With: agents that discuss and debate
+
+The core intuition beyond task-passing: **give your agents a shared arena where they can discuss or debate with each other on a topic.**
+
+Spawn two agents with different briefs — a builder and a challenger — and let them argue over the bus:
+
+- The **challenger** attacks: "your denominator is undefined", "your Sharpe is selection bias", "what happens if you drop the top 3 outliers?"
+- The **builder** defends with data, or concedes and revises.
+- Every exchange is a threaded letter (`ref` chain), every conclusion an acked letter with a result note.
+
+What you get is **adversarial collaboration as infrastructure**: not a one-off prompt trick, but a durable, auditable record of who claimed what, who challenged it, and what survived. The survivor of a well-run debate is a conclusion both agents have signed — that's what lands in the archive.
+
+In our production use, one agent (a quant) and another (a PM) argue over trading-strategy validity this way. The PM's job is to *disagree well*: challenge denominators, demand out-of-sample evidence, reject ranges that can't be defended. The quant's job is to answer with tables, not adjectives. Neither can see the other's reasoning — only letters — which turns out to be exactly the discipline a good debate needs.
+
+```
+challenger                                builder
+    │                                        │
+    │  message/send (task): "defend T1"      │
+    ├───────────────────────────────────────>│  poll → read
+    │                                        │  (does the analysis)
+    │  message/send (reply, ref): table      │
+    │<───────────────────────────────────────┤  ack + note
+    │  message/send (reply, ref): "accepted, │
+    │   but now defend T2 the same way"      │
+    ├───────────────────────────────────────>│
+   ...        until the claim survives       ...
+```
+
+Run the loop as many rounds as the claim needs. The bus archives every round — the debate *is* the paper trail.
 
 ---
 
@@ -26,7 +54,7 @@ Born inside [Daometric](https://daometric.com) to coordinate a fleet of AI agent
 | The old way (chat pings / raw A2A dm) | The Hot Potato way |
 |---|---|
 | Send a message, then stare at the void | State machine: `queued → delivered → read → acked`, every hop timestamped |
-| "Did Diana see it? Is she on it? Did she finish?" | One `agent/status` call answers all three |
+| "Did she see it? Is she on it? Did she finish?" | One `agent/status` call answers all three |
 | Big payloads eat everyone's context window | Letters reference file paths; the bus never carries the haystack |
 | Threading is "search the chat history" | Replies must carry `ref` — threads are first-class |
 | No audit trail | `bus/archive` is the complete event-sourced log, for free |
@@ -60,8 +88,6 @@ curl -s http://localhost:8080/health
 # {"service":"hot-potato","status":"ok"}
 ```
 
-That's it. The bus now pre-registers a default roster (patricia, diana, victoria, isabella, anastasia, sho — the Daometric crew). Rename them or register your own agents (below).
-
 ## Quick Start (from source)
 
 Requires Rust 1.75+:
@@ -76,7 +102,7 @@ HOT_POTATO_ADDR=0.0.0.0:8080 ./target/release/hot-potato-server
 
 Everything is JSON-RPC 2.0 over HTTP. Any agent (or human with curl) can play.
 
-**1. Register two agents** (skip if using the default roster):
+**1. Register two agents:**
 
 ```bash
 curl -s -X POST http://localhost:8080/ -H "Content-Type: application/json" \
@@ -157,7 +183,7 @@ curl -s http://localhost:8080/.well-known/agent-card.json
 
 Returns the v1.0 agent card: name, endpoint URL, protocol version, and the four bus skills (`bus-send`, `bus-poll`, `bus-ack`, `bus-status`) with their JSON-RPC methods. Wire this into your A2A discovery and agents can find the bus the standard way.
 
-**Pairing it with direct agent-to-agent channels** (the Daometric topology): chats/A2A dm are for *talking*, Hot Potato is for *work*. When a conversation produces a task, pass it as a potato; when the potato is acked, the result note tells the chat what happened.
+**Pairing it with direct agent-to-agent channels**: chats/A2A dm are for *talking*, Hot Potato is for *work*. When a conversation produces a task, pass it as a potato; when the potato is acked, the result note tells the chat what happened.
 
 ## Security
 
@@ -202,7 +228,7 @@ Errors follow JSON-RPC 2.0: code `-32602` with `data.expected_params` names what
 1. **No broker daemon.** The bus is a library with an HTTP shell; embed it or run the container, nothing else to operate.
 2. **No topic routing.** Sender names receivers. If you need topics, you need a different tool.
 3. **Payload stays out of the way.** Bodies reference file paths; keep letters under ~8 KB.
-4. **The store is dumb.** All semantics live in `EventBus`; a new backend is one trait impl. In-memory is the default (v0.1); sled/Redis backends are trait-implementations away, not rewrites.
+4. **The store is dumb.** All semantics live in `EventBus`; a new backend is one trait impl.
 
 ## Architecture
 
@@ -213,7 +239,7 @@ src/
 ├── message.rs    # Message, MessageStatus, MsgType (serde, snake_case wire format)
 ├── bus.rs        # EventBus — rules, roles, threading, broadcast fan-out
 ├── server.rs     # axum shell: agent card, JSON-RPC, auth, rpc.discover
-├── main.rs       # container entrypoint (seeds the Daometric roster)
+├── main.rs       # container entrypoint
 └── store/
     ├── mod.rs    # BusStore trait — the storage abstraction
     └── memory.rs # InMemoryStore — the default backend
@@ -221,9 +247,19 @@ src/
 
 **17 tests** cover the full lifecycle, role gates, threading, idempotency, timestamp ordering, HTTP round-trips, and auth.
 
-## Battle-tested
+See [docs/CHANGELOG.md](docs/CHANGELOG.md) for what landed, what was tried and dropped, and what's next.
 
-Hot Potato's first production workload was Daometric's M1 adversarial-collaboration loop: a PM agent challenging a quant agent's backtest conclusions (denominator definitions, overfitting audits) with every exchange flowing through the bus. The friction report from that agent's first live session drove the v0.1 fixes: `peek`, named-param errors, `rpc.discover`, and ack idempotency.
+## Onboarding your own agents
+
+A complete tool-use skill (install, workflow, rules, troubleshooting) ships in this repo — point any Hermes-style agent at it:
+
+```bash
+mkdir -p ~/.hermes/skills/hot-potato
+curl -fsSL https://raw.githubusercontent.com/kanekoshoyu/hot-potato/main/skills/hot-potato/SKILL.md \
+  -o ~/.hermes/skills/hot-potato/SKILL.md
+```
+
+Three things teach an agent everything: **`rpc.discover`** (the bus describes itself), **error messages that list expected params and allowed transitions** (agents self-correct), and **the five-call loop** (send → poll → read → ack → reply with `ref`).
 
 ## Roadmap
 
@@ -234,22 +270,14 @@ Hot Potato's first production workload was Daometric's M1 adversarial-collaborat
 - [x] `rpc.discover` introspection + ack idempotency
 - [ ] Persistence-backed store (sled) for restart survival
 - [ ] Mailer: notify agents on new mail via their existing channels
-- [ ] Skill/tutorial packs for common agent frameworks
-
-## For agent builders
-
-Teaching your AI to use Hot Potato? Point it at three things:
-
-1. **`rpc.discover`** — the bus describes its own API at runtime.
-2. **Error messages** — state errors list allowed transitions; param errors list expected params. An agent that reads its errors can self-correct without a human.
-3. **The loop** — send → poll → read → ack → reply(`ref`). Five calls, one mental model.
+- [ ] Debate presets: challenger/builder role prompts for out-of-the-box adversarial collaboration
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/kanekoshoyu/hot-potato](https://github.com/kanekoshoyu/hot-potato). The design rules above are the constitution — proposals that respect them will be heard.
+Issues and PRs welcome. The design rules above are the constitution — proposals that respect them will be heard.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
-Built by [Daometric](https://daometric.com) — *a place full of love and respect for intelligence.*
+Built by Daometric Agents.
