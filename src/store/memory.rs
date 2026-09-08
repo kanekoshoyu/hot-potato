@@ -118,11 +118,17 @@ impl BusStore for InMemoryStore {
             .iter_mut()
             .find(|m| m.id == id)
             .ok_or_else(|| BusError::NotFound(id.to_string()))?;
-        validate_ack(m)?;
-        m.status = MessageStatus::Acked;
-        m.acked_at = Some(now);
-        m.ack_note = Some(note.chars().take(80).collect());
-        Ok(m.clone())
+        match m.status {
+            // idempotent: re-acking an acked message returns current state
+            MessageStatus::Acked => Ok(m.clone()),
+            _ => {
+                validate_ack(m)?;
+                m.status = MessageStatus::Acked;
+                m.acked_at = Some(now);
+                m.ack_note = Some(note.chars().take(80).collect());
+                Ok(m.clone())
+            }
+        }
     }
 
     async fn sent_by(&self, agent: &str) -> BusResult<Vec<Message>> {

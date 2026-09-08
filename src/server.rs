@@ -111,6 +111,23 @@ struct RpcRequest {
     params: Value,
 }
 
+/// Add `rpc.discover` (JSON-RPC introspection, A2A-friendly) + a bus method table.
+async fn discover() -> Value {
+    json!({
+        "methods": [
+            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus"},
+            {"name":"message/send","params":["sender","receiver","type (task|reply|broadcast|ack_only)","subject","body","ref (required for reply)"],"desc":"pass a potato"},
+            {"name":"message/poll","params":["agent","limit (optional, 0=all)"],"desc":"drain my mailbox; marks returned letters delivered (poll = claim)"},
+            {"name":"message/peek","params":["agent"],"desc":"look without marking (queued letters only)"},
+            {"name":"message/read","params":["agent","id"],"desc":"chatlog read receipt; requires delivered state"},
+            {"name":"message/ack","params":["agent","id","note (<=80 chars)"],"desc":"file the result; idempotent on already-acked; accepts delivered or read"},
+            {"name":"agent/status","params":["agent"],"desc":"lifecycle of everything this agent SENT"},
+            {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
+            {"name":"rpc.discover","params":[],"desc":"this document"}
+        ]
+    })
+}
+
 /// JSON-RPC handler — the single endpoint agents talk to.
 async fn rpc(
     State((bus, config)): State<(Arc<EventBus<InMemoryStore>>, Arc<ServerConfig>)>,
@@ -212,13 +229,29 @@ async fn rpc(
             }
         })
         .await,
+        "message/peek" => {
+            let agent = match req.params.get("agent").and_then(|v| v.as_str()) {
+                Some(a) => a.to_string(),
+                None => String::new(),
+            };
+            if agent.is_empty() {
+                return param_error(&req.id, "agent", &["agent"]);
+            }
+            bus.peek(&agent)
+                .await
+                .map(|msgs| json!(msgs))
+                .map_err(|e| e.to_string())
+        }
         "bus/archive" => {
             bus.archive()
                 .await
                 .map(|m| json!(m))
                 .map_err(|e| e.to_string())
         }
-        other => Err(format!("unknown method: {other}")),
+        "rpc.discover" => Ok(discover().await),
+        other => Err(format!(
+            "unknown method: {other} (call rpc.discover for the method table)"
+        )),
     };
 
     match result {
@@ -273,6 +306,21 @@ where
 {
     let g = |k: &str| p.get(k).and_then(|v| v.as_str()).ok_or("missing param");
     f(g("sender")?, g("receiver")?, g("type").unwrap_or("task"), g("subject")?, g("body")?).await
+}
+
+/// 400-class JSON-RPC error that names the missing param and lists expected ones.
+fn param_error(id: &Option<Value>, missing: &str, expected: &[&str]) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "jsonrpc":"2.0","id":id,
+            "error":{
+                "code":-32602,
+                "message": format!("missing required param: {missing}"),
+                "data": {"expected_params": expected}
+            }
+        })),
+    )
 }
 
 async fn health() -> impl IntoResponse {
