@@ -1,0 +1,22 @@
+[package]
+name = "hot-potato"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "EventMessageBus for AI agents — a mailbox with a state machine. Hot potato: pass it on, mind your own work."
+license = "MIT"
+repository = "https://github.com/kanekoshoyu/hot-potato"
+keywords = ["agents", "message-bus", "a2a", "event-driven", "async"]
+categories = ["asynchronous", "development-tools"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
