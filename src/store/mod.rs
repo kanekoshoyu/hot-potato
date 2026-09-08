@@ -9,6 +9,8 @@
 //! - `poll` drains *and marks* delivered (hot potato leaves the shelf)
 //! - `ack` files the letter into the archive (audit trail = event sourcing)
 
+pub mod memory;
+
 use crate::error::BusResult;
 use crate::message::Message;
 use async_trait::async_trait;
@@ -24,6 +26,9 @@ pub trait BusStore: Send + Sync {
     /// Drain up to `limit` queued messages for `agent`, marking them delivered.
     /// Order: FIFO by creation time.
     async fn poll(&self, agent: &str, limit: usize) -> BusResult<Vec<Message>>;
+
+    /// Mark one delivered message as read (chatlog receipt: `read_at` set).
+    async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message>;
 
     /// Peek without marking (inspection, dashboards).
     async fn peek(&self, agent: &str) -> BusResult<Vec<Message>>;
@@ -56,6 +61,16 @@ pub fn fifo(messages: &mut [Message]) {
 
 /// Helper shared by in-memory and future backends: validate ack target.
 pub fn validate_ack(msg: &Message) -> BusResult<()> {
+    use crate::error::BusError;
+    use crate::message::MessageStatus;
+    match msg.status {
+        MessageStatus::Delivered | MessageStatus::Read => Ok(()),
+        other => Err(BusError::NotDeliverable(msg.id.clone(), format!("{other:?}"))),
+    }
+}
+
+/// Helper: validate read target (must have been delivered at least).
+pub fn validate_read(msg: &Message) -> BusResult<()> {
     use crate::error::BusError;
     use crate::message::MessageStatus;
     match msg.status {
