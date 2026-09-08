@@ -53,7 +53,6 @@ impl<S: BusStore> EventBus<S> {
         r#ref: Option<String>,
     ) -> BusResult<String> {
         self.ensure_registered(sender).await?;
-        self.ensure_registered(receiver).await?;
 
         if msg_type == MsgType::Broadcast {
             let role = self.role_of(sender).await;
@@ -67,6 +66,11 @@ impl<S: BusStore> EventBus<S> {
             return Err(BusError::Storage(
                 "reply messages must carry `ref` (the parent id)".into(),
             ));
+        }
+        if msg_type == MsgType::Broadcast {
+            // receiver is ignored for broadcasts; fan-out handled in `broadcast()`
+        } else {
+            self.ensure_registered(receiver).await?;
         }
 
         let msg = Message::new(sender, receiver, msg_type, subject, body, r#ref);
@@ -101,6 +105,12 @@ impl<S: BusStore> EventBus<S> {
         self.ensure_registered(agent).await?;
         let limit = if limit == 0 { usize::MAX } else { limit };
         self.store.poll(agent, limit).await
+    }
+
+    /// Read receipt: I opened it (chatlog `read_at` timestamp).
+    pub async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
+        self.ensure_registered(agent).await?;
+        self.store.mark_read(agent, id).await
     }
 
     /// Peek without marking — "what's waiting if I pick it up?"
@@ -183,7 +193,7 @@ mod tests {
         assert_eq!(acked.status, crate::message::MessageStatus::Acked);
 
         let p_status = b.status("patricia").await.unwrap();
-        assert_eq!(p_status.len(), 2); // task + the reply addressed to her
+        assert_eq!(p_status.len(), 1); // only the task she sent (reply is diana's)
     }
 
     #[tokio::test]
@@ -223,6 +233,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BusError::UnknownAgent(_)));
+    }
+
+    #[tokio::test]
+    async fn chatlog_timestamps_flow() {
+        let b = bus().await;
+        let id = b
+            .send("patricia", "diana", MsgType::Task, "t", "b", None)
+            .await
+            .unwrap();
+
+        // queued: no read receipt yet
+        let s0 = b.status("patricia").await.unwrap();
+        assert!(s0[0].read_at.is_none());
+
+        b.poll("diana", 0).await.unwrap();
+        let read = b.mark_read("diana", &id).await.unwrap();
+        assert_eq!(read.status, crate::message::MessageStatus::Read);
+        assert!(read.read_at.is_some());
+        assert!(read.delivered_at.is_some());
+
+        // read->ack legal; delivered_at <= read_at
+        let acked = b.ack("diana", &id, "done").await.unwrap();
+        assert!(acked.delivered_at.unwrap() <= acked.read_at.unwrap());
+        assert!(acked.read_at.unwrap() <= acked.acked_at.unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_before_delivery_rejected() {
+        let b = bus().await;
+        let id = b
+            .send("patricia", "diana", MsgType::Task, "t", "b", None)
+            .await
+            .unwrap();
+        let err = b.mark_read("diana", &id).await.unwrap_err();
+        assert!(matches!(err, BusError::NotDeliverable(_, _)));
     }
 
     #[tokio::test]

@@ -79,6 +79,22 @@ impl BusStore for InMemoryStore {
         Ok(out)
     }
 
+    async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        super::validate_read(m)?;
+        m.status = MessageStatus::Read;
+        m.read_at = Some(chrono::Utc::now());
+        Ok(m.clone())
+    }
+
     async fn peek(&self, agent: &str) -> BusResult<Vec<Message>> {
         let inner = self.inner.read().expect("store poisoned");
         Ok(inner

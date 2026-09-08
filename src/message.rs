@@ -26,6 +26,8 @@ pub enum MessageStatus {
     Queued,
     /// Recipient polled it — hot potato is now in their hands.
     Delivered,
+    /// Recipient opened/read the payload (chatlog-style read receipt).
+    Read,
     /// Recipient finished their part and filed the result.
     Acked,
 }
@@ -48,6 +50,9 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<DateTime<Utc>>,
+    /// Chatlog-style read receipt: when the recipient actually opened it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acked_at: Option<DateTime<Utc>>,
     /// <= 80 chars completion summary written on ack.
@@ -76,6 +81,7 @@ impl Message {
             status: MessageStatus::Queued,
             created_at: Utc::now(),
             delivered_at: None,
+            read_at: None,
             acked_at: None,
             ack_note: None,
         }
