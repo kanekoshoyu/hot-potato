@@ -16,6 +16,7 @@
 pub mod error;
 pub mod message;
 pub mod bus;
+pub mod server;
 pub mod store;
 
 pub use bus::EventBus;

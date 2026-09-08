@@ -69,16 +69,6 @@ pub fn validate_ack(msg: &Message) -> BusResult<()> {
     }
 }
 
-/// Helper: validate read target (must have been delivered at least).
-pub fn validate_read(msg: &Message) -> BusResult<()> {
-    use crate::error::BusError;
-    use crate::message::MessageStatus;
-    match msg.status {
-        MessageStatus::Delivered => Ok(()),
-        other => Err(BusError::NotDeliverable(msg.id.clone(), format!("{other:?}"))),
-    }
-}
-
 /// Convenience: group messages by receiver (for status dashboards).
 pub fn group_by_receiver(messages: &[Message]) -> BTreeMap<String, Vec<&Message>> {
     let mut map: BTreeMap<String, Vec<&Message>> = BTreeMap::new();

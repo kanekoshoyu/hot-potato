@@ -1,0 +1,13 @@
+services:
+  hot-potato:
+    build: .
+    container_name: hot-potato
+    ports:
+      - "8080:8080"
+    environment:
+      HOT_POTATO_NAME: hot-potato
+      HOT_POTATO_DESCRIPTION: "EventMessageBus for AI agents - a mailbox with a state machine"
+      HOT_POTATO_URL: http://localhost:8080
+      # HOT_POTATO_TOKEN: change-me-in-production   # uncomment to require auth
+      RUST_LOG: info
+    restart: unless-stopped

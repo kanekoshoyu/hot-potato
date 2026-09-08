@@ -89,7 +89,10 @@ impl BusStore for InMemoryStore {
             .iter_mut()
             .find(|m| m.id == id)
             .ok_or_else(|| BusError::NotFound(id.to_string()))?;
-        super::validate_read(m)?;
+        // must be delivered (not queued/acked) to be read
+        if m.status != MessageStatus::Delivered {
+            return Err(BusError::NotDeliverable(m.id.clone(), format!("{:?}", m.status)));
+        }
         m.status = MessageStatus::Read;
         m.read_at = Some(chrono::Utc::now());
         Ok(m.clone())
