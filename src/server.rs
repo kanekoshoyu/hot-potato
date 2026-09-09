@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::bus::{EventBus, Role};
 use crate::message::MsgType;
 use crate::store::memory::InMemoryStore;
+use crate::ws::EventHub;
 
 /// A2A Agent Card (v1.0 shape, trimmed to fields that matter for a bus).
 #[derive(Debug, Clone, Serialize)]
@@ -51,7 +52,8 @@ impl ServerConfig {
             description: std::env::var("HOT_POTATO_DESCRIPTION").unwrap_or_else(|_| {
                 "EventMessageBus for AI agents - a mailbox with a state machine".into()
             }),
-            public_url: std::env::var("HOT_POTATO_URL").unwrap_or_else(|_| "http://localhost:8080".into()),
+            public_url: std::env::var("HOT_POTATO_URL")
+                .unwrap_or_else(|_| "http://localhost:8080".into()),
             version: env!("CARGO_PKG_VERSION").to_string(),
             bearer_token: std::env::var("HOT_POTATO_TOKEN").ok(),
         }
@@ -123,6 +125,7 @@ async fn discover() -> Value {
             {"name":"message/ack","params":["agent","id","note (<=80 chars)"],"desc":"file the result; idempotent on already-acked; accepts delivered or read"},
             {"name":"agent/status","params":["agent"],"desc":"lifecycle of everything this agent SENT"},
             {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
+            {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)"],"desc":"OBSERVER: every letter on the bus, any status, read-only (v0.2)"},
             {"name":"rpc.discover","params":[],"desc":"this document"}
         ]
     })
@@ -130,7 +133,7 @@ async fn discover() -> Value {
 
 /// JSON-RPC handler — the single endpoint agents talk to.
 async fn rpc(
-    State((bus, config)): State<(Arc<EventBus<InMemoryStore>>, Arc<ServerConfig>)>,
+    State((bus, hub, config)): State<BusState>,
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
@@ -143,45 +146,68 @@ async fn rpc(
         if !ok {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,"message":"unauthorized"}})),
+                Json(
+                    json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,"message":"unauthorized"}}),
+                ),
             );
         }
     }
 
     let result: Result<Value, String> = match req.method.as_str() {
-        "agent/register" => parse2(&req.params, ["agent", "role"], |p, agent, role| {
-            let role = if role == "pm" { Role::Pm } else { Role::Worker };
-            let agent = agent.to_string();
-            async move {
-                bus.register(&agent, role)
-                    .await
-                    .map(|_| json!({"registered": agent}))
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await,
-        "message/send" => parse5(&req.params, |sender, receiver, msg_type, subject, body| {
-            let mt = match msg_type {
-                "reply" => MsgType::Reply,
-                "broadcast" => MsgType::Broadcast,
-                "ack_only" => MsgType::AckOnly,
-                _ => MsgType::Task,
-            };
-            let r#ref = req
-                .params
-                .get("ref")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let (sender, receiver, subject, body) =
-                (sender.to_string(), receiver.to_string(), subject.to_string(), body.to_string());
-            async move {
-                bus.send(&sender, &receiver, mt, &subject, &body, r#ref)
-                    .await
-                    .map(|id| json!({"id": id}))
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await,
+        "agent/register" => {
+            parse2(&req.params, ["agent", "role"], |p, agent, role| {
+                let role = if role == "pm" { Role::Pm } else { Role::Worker };
+                let agent = agent.to_string();
+                async move {
+                    bus.register(&agent, role)
+                        .await
+                        .map(|_| json!({"registered": agent}))
+                        .map_err(|e| e.to_string())
+                }
+            })
+            .await
+        }
+        "message/send" => {
+            parse5(&req.params, |sender, receiver, msg_type, subject, body| {
+                let mt = match msg_type {
+                    "reply" => MsgType::Reply,
+                    "broadcast" => MsgType::Broadcast,
+                    "ack_only" => MsgType::AckOnly,
+                    _ => MsgType::Task,
+                };
+                let r#ref = req
+                    .params
+                    .get("ref")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let (sender, receiver, subject, body) = (
+                    sender.to_string(),
+                    receiver.to_string(),
+                    subject.to_string(),
+                    body.to_string(),
+                );
+                async move {
+                    bus.send(&sender, &receiver, mt, &subject, &body, r#ref)
+                        .await
+                        .map(|id| {
+                            hub.emit(
+                                "queued",
+                                &crate::message::Message::new(
+                                    sender.clone(),
+                                    receiver.clone(),
+                                    mt,
+                                    subject.clone(),
+                                    body.clone(),
+                                    None,
+                                ),
+                            );
+                            json!({"id": id})
+                        })
+                        .map_err(|e| e.to_string())
+                }
+            })
+            .await
+        }
         "message/poll" => {
             let agent = match req.params.get("agent").and_then(|v| v.as_str()) {
                 Some(a) => a.to_string(),
@@ -190,45 +216,72 @@ async fn rpc(
             if agent.starts_with("missing param") {
                 return (
                     StatusCode::OK,
-                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":agent}})),
+                    Json(
+                        json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":agent}}),
+                    ),
                 );
             }
-            let limit = req.params.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             bus.poll(&agent, limit)
                 .await
-                .map(|msgs| json!(msgs))
+                .map(|msgs| {
+                    for m in &msgs {
+                        hub.emit("delivered", m);
+                    }
+                    json!(msgs)
+                })
                 .map_err(|e| e.to_string())
         }
-        "message/read" => parse2(&req.params, ["agent", "id"], |_p, agent, id| {
-            let (agent, id) = (agent.to_string(), id.to_string());
-            async move {
-                bus.mark_read(&agent, &id)
-                    .await
-                    .map(|m| json!(m))
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await,
-        "message/ack" => parse3(&req.params, ["agent", "id", "note"], |_p, agent, id, note| {
-            let (agent, id, note) = (agent.to_string(), id.to_string(), note.to_string());
-            async move {
-                bus.ack(&agent, &id, &note)
-                    .await
-                    .map(|m| json!(m))
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await,
-        "agent/status" => parse1(&req.params, "agent", |agent| {
-            let agent = agent.to_string();
-            async move {
-                bus.status(&agent)
-                    .await
-                    .map(|m| json!(m))
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await,
+        "message/read" => {
+            parse2(&req.params, ["agent", "id"], |_p, agent, id| {
+                let (agent, id) = (agent.to_string(), id.to_string());
+                async move {
+                    bus.mark_read(&agent, &id)
+                        .await
+                        .map(|m| {
+                            hub.emit("read", &m);
+                            json!(m)
+                        })
+                        .map_err(|e| e.to_string())
+                }
+            })
+            .await
+        }
+        "message/ack" => {
+            parse3(
+                &req.params,
+                ["agent", "id", "note"],
+                |_p, agent, id, note| {
+                    let (agent, id, note) = (agent.to_string(), id.to_string(), note.to_string());
+                    async move {
+                        bus.ack(&agent, &id, &note)
+                            .await
+                            .map(|m| {
+                                hub.emit("acked", &m);
+                                json!(m)
+                            })
+                            .map_err(|e| e.to_string())
+                    }
+                },
+            )
+            .await
+        }
+        "agent/status" => {
+            parse1(&req.params, "agent", |agent| {
+                let agent = agent.to_string();
+                async move {
+                    bus.status(&agent)
+                        .await
+                        .map(|m| json!(m))
+                        .map_err(|e| e.to_string())
+                }
+            })
+            .await
+        }
         "message/peek" => {
             let agent = match req.params.get("agent").and_then(|v| v.as_str()) {
                 Some(a) => a.to_string(),
@@ -242,10 +295,33 @@ async fn rpc(
                 .map(|msgs| json!(msgs))
                 .map_err(|e| e.to_string())
         }
-        "bus/archive" => {
-            bus.archive()
+        "bus/archive" => bus
+            .archive()
+            .await
+            .map(|m| json!(m))
+            .map_err(|e| e.to_string()),
+        "message/list" => {
+            let status = req
+                .params
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            bus.list_all()
                 .await
-                .map(|m| json!(m))
+                .map(|mut msgs| {
+                    if let Some(s) = &status {
+                        msgs.retain(|m| {
+                            format!("{:?}", m.status).to_lowercase() == s.to_lowercase()
+                        });
+                    }
+                    fifo_last(&mut msgs, limit);
+                    json!(msgs)
+                })
                 .map_err(|e| e.to_string())
         }
         "rpc.discover" => Ok(discover().await),
@@ -255,7 +331,10 @@ async fn rpc(
     };
 
     match result {
-        Ok(v) => (StatusCode::OK, Json(json!({"jsonrpc":"2.0","id":req.id,"result":v}))),
+        Ok(v) => (
+            StatusCode::OK,
+            Json(json!({"jsonrpc":"2.0","id":req.id,"result":v})),
+        ),
         Err(e) => (
             StatusCode::OK, // JSON-RPC errors ride 200 with an error object
             Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32603,"message":e}})),
@@ -266,6 +345,14 @@ async fn rpc(
 // --- small param extractors to keep the match arms readable ---
 
 type P<'a> = &'a Value;
+
+/// Keep the last `limit` letters (newest window); limit 0 = all.
+fn fifo_last(msgs: &mut Vec<crate::message::Message>, limit: usize) {
+    if limit > 0 && msgs.len() > limit {
+        let drain = msgs.len() - limit;
+        msgs.drain(0..drain);
+    }
+}
 
 async fn parse1<F, Fut>(p: P<'_>, k1: &str, f: F) -> Result<Value, String>
 where
@@ -281,8 +368,14 @@ where
     F: FnOnce(P<'_>, &str, &str) -> Fut,
     Fut: std::future::Future<Output = Result<Value, String>>,
 {
-    let v1 = p.get(keys[0]).and_then(|v| v.as_str()).ok_or("missing param")?;
-    let v2 = p.get(keys[1]).and_then(|v| v.as_str()).ok_or("missing param")?;
+    let v1 = p
+        .get(keys[0])
+        .and_then(|v| v.as_str())
+        .ok_or("missing param")?;
+    let v2 = p
+        .get(keys[1])
+        .and_then(|v| v.as_str())
+        .ok_or("missing param")?;
     f(p, v1, v2).await
 }
 
@@ -292,9 +385,15 @@ where
     Fut: std::future::Future<Output = Result<Value, String>>,
 {
     let (v1, v2, v3) = (
-        p.get(keys[0]).and_then(|v| v.as_str()).ok_or("missing param")?,
-        p.get(keys[1]).and_then(|v| v.as_str()).ok_or("missing param")?,
-        p.get(keys[2]).and_then(|v| v.as_str()).ok_or("missing param")?,
+        p.get(keys[0])
+            .and_then(|v| v.as_str())
+            .ok_or("missing param")?,
+        p.get(keys[1])
+            .and_then(|v| v.as_str())
+            .ok_or("missing param")?,
+        p.get(keys[2])
+            .and_then(|v| v.as_str())
+            .ok_or("missing param")?,
     );
     f(p, v1, v2, v3).await
 }
@@ -305,7 +404,14 @@ where
     Fut: std::future::Future<Output = Result<Value, String>>,
 {
     let g = |k: &str| p.get(k).and_then(|v| v.as_str()).ok_or("missing param");
-    f(g("sender")?, g("receiver")?, g("type").unwrap_or("task"), g("subject")?, g("body")?).await
+    f(
+        g("sender")?,
+        g("receiver")?,
+        g("type").unwrap_or("task"),
+        g("subject")?,
+        g("body")?,
+    )
+    .await
 }
 
 /// 400-class JSON-RPC error that names the missing param and lists expected ones.
@@ -327,24 +433,74 @@ async fn health() -> impl IntoResponse {
     Json(json!({"status": "ok", "service": "hot-potato"}))
 }
 
+/// GET /log?limit=N — human-readable lifecycle page (RFC-001 F2).
+/// The chatlog view: every letter on the bus, newest last, one line each.
+async fn log_page(
+    State((bus, _hub, _config)): State<BusState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let msgs = bus.list_all().await.unwrap_or_default();
+    let limit: usize = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let start = msgs.len().saturating_sub(limit);
+    let mut body = String::from("🥔 hot-potato lifecycle log\n\n");
+    body.push_str(&format!(
+        "{:<6} {:<10} {:<10} {:<11} {:<26} {}\n",
+        "status", "sender", "receiver", "type", "id", "subject"
+    ));
+    body.push_str(&"-".repeat(90));
+    body.push('\n');
+    for m in &msgs[start..] {
+        body.push_str(&format!(
+            "{:<6} {:<10} {:<10} {:<11} {:<26} {}\n",
+            format!("{:?}", m.status).to_lowercase(),
+            m.sender,
+            m.receiver,
+            format!("{:?}", m.msg_type).to_lowercase(),
+            m.id,
+            m.subject,
+        ));
+    }
+    body.push_str(&format!(
+        "\n{} letters shown ({} total)\n",
+        msgs.len() - start,
+        msgs.len()
+    ));
+    axum::http::header::HeaderMap::new(); // keep type inference happy
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+/// Shared app state: the bus, its config, and the ws event hub.
+pub type BusState = (Arc<EventBus>, Arc<EventHub>, Arc<ServerConfig>);
+
 /// Build the router (exposed for tests + compose).
-pub fn router(
-    bus: Arc<EventBus<InMemoryStore>>,
-    config: Arc<ServerConfig>,
-) -> Router {
+pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
+    let hub = Arc::new(EventHub::new());
     let card = config.agent_card();
-    Router::new()
+    let app = crate::ws::router()
+        .route("/log", get(log_page))
         .route("/", post(rpc))
         .route("/health", get(health))
-        .route("/.well-known/agent-card.json", get(move || async move {
-            Json(serde_json::to_value(card.clone()).expect("card serializes"))
-        }))
-        .with_state((bus, config))
+        .route(
+            "/.well-known/agent-card.json",
+            get(move || async move {
+                Json(serde_json::to_value(card.clone()).expect("card serializes"))
+            }),
+        )
+        .with_state((bus, hub, config));
+    let swagger = utoipa_swagger_ui::SwaggerUi::new("/docs")
+        .url("/openapi.json", crate::openapi::openapi_doc());
+    app.merge(swagger)
 }
 
 /// Bind and serve. Called from main.
 pub async fn serve(
-    bus: Arc<EventBus<InMemoryStore>>,
+    bus: Arc<EventBus>,
     config: Arc<ServerConfig>,
     addr: &str,
 ) -> std::io::Result<()> {
@@ -361,14 +517,14 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt; // oneshot
 
-    async fn test_bus() -> Arc<EventBus<InMemoryStore>> {
+    async fn test_bus() -> Arc<EventBus> {
         let bus = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
         bus.register("patricia", Role::Pm).await.unwrap();
         bus.register("diana", Role::Worker).await.unwrap();
         bus
     }
 
-    fn app(bus: Arc<EventBus<InMemoryStore>>) -> Router {
+    fn app(bus: Arc<EventBus>) -> Router {
         let cfg = Arc::new(ServerConfig {
             name: "test".into(),
             description: "d".into(),
@@ -391,7 +547,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         serde_json::from_slice::<Value>(&bytes).unwrap()
     }
 
@@ -406,7 +564,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let card: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(card["protocol_version"], "1.0");
         assert_eq!(card["skills"].as_array().unwrap().len(), 4);
@@ -418,10 +578,14 @@ mod tests {
         let a = app(bus.clone());
 
         // send
-        let res = rpc_call(a, "message/send", json!({
-            "sender":"patricia","receiver":"diana","type":"task",
-            "subject":"run X","body":"b"
-        }))
+        let res = rpc_call(
+            a,
+            "message/send",
+            json!({
+                "sender":"patricia","receiver":"diana","type":"task",
+                "subject":"run X","body":"b"
+            }),
+        )
         .await;
         assert!(res.get("result").is_some(), "send failed: {res}");
         let id = res["result"]["id"].as_str().unwrap().to_string();
@@ -432,18 +596,124 @@ mod tests {
         assert_eq!(res["result"].as_array().unwrap().len(), 1);
 
         // read receipt
-        let res = rpc_call(app(bus.clone()), "message/read", json!({"agent":"diana","id":id})).await;
+        let res = rpc_call(
+            app(bus.clone()),
+            "message/read",
+            json!({"agent":"diana","id":id}),
+        )
+        .await;
         assert_eq!(res["result"]["status"], "read");
 
         // ack
-        let res = rpc_call(app(bus.clone()), "message/ack", json!({"agent":"diana","id":id,"note":"done"})).await;
+        let res = rpc_call(
+            app(bus.clone()),
+            "message/ack",
+            json!({"agent":"diana","id":id,"note":"done"}),
+        )
+        .await;
         assert_eq!(res["result"]["status"], "acked");
 
         // status shows the lifecycle to the sender
-        let res = rpc_call(app(bus.clone()), "agent/status", json!({"agent":"patricia"})).await;
+        let res = rpc_call(
+            app(bus.clone()),
+            "agent/status",
+            json!({"agent":"patricia"}),
+        )
+        .await;
         let arr = res["result"].as_array().unwrap();
         assert_eq!(arr[0]["status"], "acked");
         assert!(arr[0]["acked_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn message_list_is_read_only_observer_view() {
+        let bus = test_bus().await;
+        let a = app(bus.clone());
+
+        // two letters in different states
+        let res = rpc_call(
+            a,
+            "message/send",
+            json!({
+                "sender":"patricia","receiver":"diana","type":"task",
+                "subject":"one","body":"b"
+            }),
+        )
+        .await;
+        let id1 = res["result"]["id"].as_str().unwrap().to_string();
+        let _ = rpc_call(
+            app(bus.clone()),
+            "message/send",
+            json!({
+                "sender":"patricia","receiver":"diana","type":"task",
+                "subject":"two","body":"b"
+            }),
+        )
+        .await;
+
+        // list sees both, no state changed
+        let res = rpc_call(app(bus.clone()), "message/list", json!({})).await;
+        let arr = res["result"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // filter by status
+        let res = rpc_call(app(bus.clone()), "message/list", json!({"status":"queued"})).await;
+        assert_eq!(res["result"].as_array().unwrap().len(), 2);
+
+        // poll one, now the filter splits
+        let _ = rpc_call(
+            app(bus.clone()),
+            "message/poll",
+            json!({"agent":"diana","limit":1}),
+        )
+        .await;
+        let res = rpc_call(
+            app(bus.clone()),
+            "message/list",
+            json!({"status":"delivered"}),
+        )
+        .await;
+        let arr = res["result"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], id1);
+    }
+
+    #[tokio::test]
+    async fn log_page_renders_plain_text() {
+        let bus = test_bus().await;
+        let a = app(bus.clone());
+        let _ = rpc_call(
+            a,
+            "message/send",
+            json!({
+                "sender":"patricia","receiver":"diana","type":"task",
+                "subject":"hello log","body":"b"
+            }),
+        )
+        .await;
+
+        let res = app(bus)
+            .oneshot(Request::get("/log").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains("hello log"),
+            "log page missing subject: {text}"
+        );
+        assert!(text.contains("patricia"));
+        assert!(content_type.starts_with("text/plain"));
     }
 
     #[tokio::test]

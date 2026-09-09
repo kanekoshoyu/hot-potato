@@ -10,6 +10,7 @@
 //! - `ack` files the letter into the archive (audit trail = event sourcing)
 
 pub mod memory;
+pub mod sled_store;
 
 use crate::error::BusResult;
 use crate::message::Message;
@@ -42,6 +43,10 @@ pub trait BusStore: Send + Sync {
     /// Everything ever acked — the audit log.
     async fn archive(&self) -> BusResult<Vec<Message>>;
 
+    /// Every letter in the bus, any status. Read-only observer view
+    /// (`message/list`, `/log`, WebSocket stats). Never mutates state.
+    async fn list_all(&self) -> BusResult<Vec<Message>>;
+
     /// Register an agent (mailbox comes into existence). Idempotent.
     async fn register(&self, agent: &str) -> BusResult<()>;
 
@@ -65,7 +70,10 @@ pub fn validate_ack(msg: &Message) -> BusResult<()> {
     use crate::message::MessageStatus;
     match msg.status {
         MessageStatus::Delivered | MessageStatus::Read => Ok(()),
-        other => Err(BusError::NotDeliverable(msg.id.clone(), format!("{other:?}"))),
+        other => Err(BusError::NotDeliverable(
+            msg.id.clone(),
+            format!("{other:?}"),
+        )),
     }
 }
 

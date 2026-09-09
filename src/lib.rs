@@ -13,15 +13,17 @@
 //!    registration and inference endpoints is the transport layer's job,
 //!    not the bus's.
 
+pub mod bus;
 pub mod deliver;
 pub mod error;
 pub mod message;
-pub mod bus;
+pub mod openapi;
 pub mod server;
 pub mod store;
+pub mod ws;
 
 pub use bus::EventBus;
 pub use error::BusError;
 pub use message::{Message, MessageStatus, MsgType};
-pub use store::BusStore;
 pub use store::memory::InMemoryStore;
+pub use store::BusStore;

@@ -68,7 +68,10 @@ impl BusStore for InMemoryStore {
         };
         fifo(box_);
         let mut out = Vec::new();
-        for m in box_.iter_mut().filter(|m| m.status == MessageStatus::Queued) {
+        for m in box_
+            .iter_mut()
+            .filter(|m| m.status == MessageStatus::Queued)
+        {
             m.status = MessageStatus::Delivered;
             m.delivered_at = Some(now);
             out.push(m.clone());
@@ -91,7 +94,10 @@ impl BusStore for InMemoryStore {
             .ok_or_else(|| BusError::NotFound(id.to_string()))?;
         // must be delivered (not queued/acked) to be read
         if m.status != MessageStatus::Delivered {
-            return Err(BusError::NotDeliverable(m.id.clone(), format!("{:?}", m.status)));
+            return Err(BusError::NotDeliverable(
+                m.id.clone(),
+                format!("{:?}", m.status),
+            ));
         }
         m.status = MessageStatus::Read;
         m.read_at = Some(chrono::Utc::now());
@@ -103,7 +109,12 @@ impl BusStore for InMemoryStore {
         Ok(inner
             .mailboxes
             .get(agent)
-            .map(|b| b.iter().filter(|m| m.status == MessageStatus::Queued).cloned().collect())
+            .map(|b| {
+                b.iter()
+                    .filter(|m| m.status == MessageStatus::Queued)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -153,6 +164,13 @@ impl BusStore for InMemoryStore {
             .filter(|m| m.status == MessageStatus::Acked)
             .cloned()
             .collect();
+        fifo(&mut out);
+        Ok(out)
+    }
+
+    async fn list_all(&self) -> BusResult<Vec<Message>> {
+        let inner = self.inner.read().expect("store poisoned");
+        let mut out: Vec<Message> = inner.mailboxes.values().flatten().cloned().collect();
         fifo(&mut out);
         Ok(out)
     }
@@ -226,9 +244,16 @@ mod tests {
     async fn fifo_order_preserved() {
         let s = setup().await;
         for i in 0..5 {
-            s.push(&Message::new("patricia", "diana", MsgType::Task, format!("m{i}"), "b", None))
-                .await
-                .unwrap();
+            s.push(&Message::new(
+                "patricia",
+                "diana",
+                MsgType::Task,
+                format!("m{i}"),
+                "b",
+                None,
+            ))
+            .await
+            .unwrap();
         }
         let drained = s.poll("diana", 10).await.unwrap();
         let subjects: Vec<_> = drained.iter().map(|m| m.subject.clone()).collect();

@@ -10,11 +10,26 @@
 use hot_potato::bus::{EventBus, Role};
 use hot_potato::server::{serve, ServerConfig};
 use hot_potato::store::memory::InMemoryStore;
+use hot_potato::store::sled_store::SledStore;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let bus = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
+    // Backend choice: HOT_POTATO_DATA_DIR set -> sled persistence (survives
+    // restarts); unset -> in-memory (v0.1 default, ephemeral by design).
+    let store: Arc<dyn hot_potato::store::BusStore> = match std::env::var("HOT_POTATO_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            eprintln!("🥔 storage: sled at {dir} (restart-safe)");
+            Arc::new(SledStore::open(&dir).expect("open sled store"))
+        }
+        _ => {
+            eprintln!(
+                "🥔 storage: in-memory (letters lost on restart; set HOT_POTATO_DATA_DIR for sled)"
+            );
+            Arc::new(InMemoryStore::new())
+        }
+    };
+    let bus = Arc::new(EventBus::new(store));
 
     // Seed the Daometric default roster (harmless anywhere, useful in compose).
     for (name, role) in [
@@ -32,6 +47,9 @@ async fn main() -> std::io::Result<()> {
     let addr = std::env::var("HOT_POTATO_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
 
     eprintln!("🥔 hot-potato server on http://{addr}");
-    eprintln!("   agent card: {}/.well-known/agent-card.json", config.public_url);
+    eprintln!(
+        "   agent card: {}/.well-known/agent-card.json",
+        config.public_url
+    );
     serve(bus, config, &addr).await
 }

@@ -21,14 +21,14 @@ pub enum Role {
     Worker,
 }
 
-pub struct EventBus<S: BusStore> {
-    store: Arc<S>,
+pub struct EventBus {
+    store: Arc<dyn BusStore>,
     /// agent -> role
     roles: tokio::sync::RwLock<std::collections::HashMap<String, Role>>,
 }
 
-impl<S: BusStore> EventBus<S> {
-    pub fn new(store: Arc<S>) -> Self {
+impl EventBus {
+    pub fn new(store: Arc<dyn BusStore>) -> Self {
         Self {
             store,
             roles: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -136,6 +136,11 @@ impl<S: BusStore> EventBus<S> {
         self.store.archive().await
     }
 
+    /// Observer view: every letter on the bus, any status. Read-only.
+    pub async fn list_all(&self) -> BusResult<Vec<Message>> {
+        self.store.list_all().await
+    }
+
     async fn ensure_registered(&self, agent: &str) -> BusResult<()> {
         let roles = self.roles.read().await;
         if roles.contains_key(agent) {
@@ -155,7 +160,7 @@ mod tests {
     use super::*;
     use crate::store::memory::InMemoryStore;
 
-    async fn bus() -> EventBus<InMemoryStore> {
+    async fn bus() -> EventBus {
         let store = Arc::new(InMemoryStore::new());
         let bus = EventBus::new(store);
         bus.register("patricia", Role::Pm).await.unwrap();
@@ -209,7 +214,10 @@ mod tests {
     #[tokio::test]
     async fn pm_can_broadcast_fans_out() {
         let b = bus().await;
-        let ids = b.broadcast("patricia", "standup 9:00", "be there").await.unwrap();
+        let ids = b
+            .broadcast("patricia", "standup 9:00", "be there")
+            .await
+            .unwrap();
         assert_eq!(ids.len(), 2); // diana + victoria, not patricia
         assert_eq!(b.peek("diana").await.unwrap().len(), 1);
         assert_eq!(b.peek("victoria").await.unwrap().len(), 1);

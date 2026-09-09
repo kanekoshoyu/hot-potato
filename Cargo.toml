@@ -11,14 +11,19 @@ categories = ["asynchronous", "development-tools"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
+sled = "0.34"
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [[bin]]
