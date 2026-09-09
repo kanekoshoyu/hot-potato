@@ -29,7 +29,25 @@ except ImportError:
 
 BUS_WS = "ws://localhost:8080/ws"
 BUS_HTTP = "http://localhost:8080"
-TG_TARGET = "telegram:5690144164"
+TG_CHAT_ID = "5690144164"  # Sho
+
+def tg_api(text: str):
+    """Send via the dedicated monitor bot (MONITOR_BOT_TOKEN in ~/.hermes/.env)."""
+    import os, urllib.request, urllib.parse
+    token = None
+    for line in open(os.path.expanduser("~/.hermes/.env")):
+        if line.startswith("MONITOR_BOT_TOKEN="):
+            token = line.strip().split("=", 1)[1]
+            break
+    if not token:
+        log("MONITOR_BOT_TOKEN missing from ~/.hermes/.env — cannot send")
+        return
+    data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": text}).encode()
+    try:
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        log(f"TG API send failed: {e}")
 
 INITIALS = {
     "patricia": "P", "diana": "D", "victoria": "V",
@@ -48,13 +66,7 @@ def initials(name: str) -> str:
 
 
 def tg(text: str):
-    try:
-        subprocess.run(
-            ["hermes", "send", "--to", TG_TARGET, text],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception as e:
-        log(f"TG send failed: {e}")
+    tg_api(text)
 
 
 def log(msg: str):
@@ -107,6 +119,9 @@ def on_event(ev: dict):
     if not mid:
         return
     if mid not in potatoes:
+        # first sight: record state silently; only announce if it's NOT the
+        # initial queued state (a brand-new letter's queued hop is announced
+        # only when we see it born live, and even then once)
         potatoes[mid] = {
             "sender": ev.get("sender", "?"),
             "receiver": ev.get("receiver", "?"),
@@ -114,7 +129,15 @@ def on_event(ev: dict):
             "status": new_status,
             "created_at": ev.get("at"),
         }
+        if new_status != "queued":
+            m = potatoes[mid]
+            tg(f"🥔 {mid[:8]} {fmt_flow(m)} — {new_status.upper()}")
+        log(f"{mid[:8]} first-seen as {new_status}")
+        maybe_alarm(mid, potatoes[mid])
+        return
     prev = potatoes[mid].get("status")
+    if prev == new_status:
+        return  # duplicate event — same status, nothing to announce
     potatoes[mid]["status"] = new_status
     log(f"{mid[:8]} {prev} -> {new_status}")
     m = potatoes[mid]
