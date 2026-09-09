@@ -11,6 +11,18 @@
   bus 透过注册表找到任何人（N 个 agent 不需要 N² 直连）②Bus 总线拓扑③事件驱动——
   A2A 只是运输层，异步信件，不需要瞬时回复。
 - 21 项测试全绿（新增 4 项：registry roundtrip、poll-only 默认、push 成功路径、push 失败不致命）。
+- **Observer API（RFC-001 F1/F2）**：`message/list`（只读，任意状态全量+按 status 过滤+limit）；
+  `GET /log`（人可读纯文本生命周期表）。store trait 新增 `list_all`，两种后端都实现。
+- **WebSocket /ws（RFC-001 F3）**：连上先收 hello+stats 快照，之后每条生命周期转变
+  （queued/delivered/read/acked）实时推送，60s 心跳带统计——"沉默有意义"。
+  慢客户端只丢事件（Lagged 提示），永不阻塞 bus。
+- **OpenAPI + Swagger UI（utoipa）**：`/openapi.json` 机器可读契约（health/log/agent-card/
+  JSON-RPC 全方法文档化），`/docs` 浏览器调试页。utoipa 5.5（手写 doc——JSON-RPC 单端点
+  没有可派生的 typed handler）+ utoipa-swagger-ui 9（axum 0.8 兼容）。
+- **sled 持久化**：`HOT_POTATO_DATA_DIR` 设置即启用（key=`receiver::ts::id`，FIFO 天然有序），
+  compose 默认挂 volume；不设则保持 v0.1 in-memory 语义。重启信不丢。
+- 29 项测试全绿（+8：list 过滤/只读、log 页渲染、hub 扇出、事件 JSON、sled 重启存活/
+  完整生命周期/越权 ack、openapi 路径断言）。
 - 版本 0.1.0 → 0.2.0。
 
 ### 动机（为什么要做 push）

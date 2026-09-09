@@ -180,10 +180,14 @@ pub async fn dispatch_push(
     letter: &serde_json::Value,
 ) -> PushOutcome {
     let Some(entry) = registry.lookup(receiver).await else {
-        return PushOutcome::Skipped { reason: "not in registry".into() };
+        return PushOutcome::Skipped {
+            reason: "not in registry".into(),
+        };
     };
     if !entry.deliver_via.is_push() {
-        return PushOutcome::Skipped { reason: "poll-only".into() };
+        return PushOutcome::Skipped {
+            reason: "poll-only".into(),
+        };
     }
     match transport.push(&entry.deliver_via, letter).await {
         Ok(()) => PushOutcome::Pushed,
@@ -206,9 +210,13 @@ mod tests {
     #[tokio::test]
     async fn registry_register_lookup_roundtrip() {
         let reg = Registry::new();
-        reg.register("the quant agent", "quant, data guardian", DeliverVia::A2a {
-            url: "http://localhost:8643/".into(),
-        })
+        reg.register(
+            "the quant agent",
+            "quant, data guardian",
+            DeliverVia::A2a {
+                url: "http://localhost:8643/".into(),
+            },
+        )
         .await;
         let e = reg.lookup("the quant agent").await.unwrap();
         assert_eq!(e.description, "quant, data guardian");
@@ -232,7 +240,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PushTransport for RecordingTransport {
-        async fn push(&self, target: &DeliverVia, _letter: &serde_json::Value) -> Result<(), String> {
+        async fn push(
+            &self,
+            target: &DeliverVia,
+            _letter: &serde_json::Value,
+        ) -> Result<(), String> {
             let url = match target {
                 DeliverVia::A2a { url } => url.clone(),
                 DeliverVia::Webhook { url } => url.clone(),
@@ -251,9 +263,13 @@ mod tests {
     #[tokio::test]
     async fn dispatch_pushes_to_registered_endpoint() {
         let reg = Arc::new(Registry::new());
-        reg.register("the quant agent", "quant", DeliverVia::Webhook {
-            url: "http://the quant agent-hook".into(),
-        })
+        reg.register(
+            "the quant agent",
+            "quant",
+            DeliverVia::Webhook {
+                url: "http://the quant agent-hook".into(),
+            },
+        )
         .await;
         reg.register("the data agent", "viz", DeliverVia::Poll).await;
 
@@ -263,30 +279,49 @@ mod tests {
         });
 
         // push lands for the quant agent
-        let out = dispatch_push(&reg, &(transport.clone() as Arc<dyn PushTransport>), "the quant agent",
-            &serde_json::json!({"id": "m1"})).await;
+        let out = dispatch_push(
+            &reg,
+            &(transport.clone() as Arc<dyn PushTransport>),
+            "the quant agent",
+            &serde_json::json!({"id": "m1"}),
+        )
+        .await;
         assert!(matches!(out, PushOutcome::Pushed));
         assert_eq!(transport.pushed.lock().unwrap().len(), 1);
 
         // the data agent is poll-only → skipped, not failed
-        let out = dispatch_push(&reg, &(transport.clone() as Arc<dyn PushTransport>), "the data agent",
-            &serde_json::json!({"id": "m2"})).await;
+        let out = dispatch_push(
+            &reg,
+            &(transport.clone() as Arc<dyn PushTransport>),
+            "the data agent",
+            &serde_json::json!({"id": "m2"}),
+        )
+        .await;
         assert!(matches!(out, PushOutcome::Skipped { .. }));
     }
 
     #[tokio::test]
     async fn push_failure_is_reported_not_fatal() {
         let reg = Arc::new(Registry::new());
-        reg.register("the quant agent", "quant", DeliverVia::Webhook {
-            url: "http://broken-hook".into(),
-        })
+        reg.register(
+            "the quant agent",
+            "quant",
+            DeliverVia::Webhook {
+                url: "http://broken-hook".into(),
+            },
+        )
         .await;
         let transport = Arc::new(RecordingTransport {
             fail_for: vec!["http://broken-hook".into()],
             pushed: std::sync::Mutex::new(vec![]),
         });
-        let out = dispatch_push(&reg, &(transport as Arc<dyn PushTransport>), "the quant agent",
-            &serde_json::json!({"id": "m1"})).await;
+        let out = dispatch_push(
+            &reg,
+            &(transport as Arc<dyn PushTransport>),
+            "the quant agent",
+            &serde_json::json!({"id": "m1"}),
+        )
+        .await;
         match out {
             PushOutcome::Failed { error } => assert!(error.contains("injected failure")),
             other => panic!("expected Failed, got {other:?}"),

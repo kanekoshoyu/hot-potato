@@ -8,6 +8,12 @@ services:
       HOT_POTATO_NAME: hot-potato
       HOT_POTATO_DESCRIPTION: "EventMessageBus for AI agents - a mailbox with a state machine"
       HOT_POTATO_URL: http://localhost:8080
+      HOT_POTATO_DATA_DIR: /data                # sled persistence (restart-safe); remove to run in-memory
       # HOT_POTATO_TOKEN: change-me-in-production   # uncomment to require auth
       RUST_LOG: info
+    volumes:
+      - hot-potato-data:/data
     restart: unless-stopped
+
+volumes:
+  hot-potato-data:

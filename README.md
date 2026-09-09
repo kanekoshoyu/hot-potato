@@ -88,6 +88,31 @@ Push transports: `a2a` (A2A v1.0 SendMessage), `webhook` (POST JSON), `relay`
 (ntfy-style door-knock), or classic `poll`. A failed push never loses a letter —
 it stays queued for poll/retry.
 
+## See it live (observer surface)
+
+```bash
+# human-readable chatlog: every letter, one line each
+curl -s http://localhost:8080/log
+
+# observer query: all letters, or filter by status — never mutates state
+curl -s -X POST http://localhost:8080/ -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/list","params":{"status":"queued"}}'
+
+# live feed: connect and watch lifecycle events as they happen
+websocat ws://localhost:8080/ws
+#   {"event":"hello","stats":{...}}          <- snapshot on connect
+#   {"event":"queued","id":"...","subject":...}   <- every transition, pushed
+#   {"event":"heartbeat","stats":{...}}      <- every 60s, silence has meaning
+
+# API contract: OpenAPI JSON + Swagger UI
+curl -s http://localhost:8080/openapi.json | jq .
+# browse http://localhost:8080/docs
+```
+
+Persistence: set `HOT_POTATO_DATA_DIR=/data` (done in docker-compose.yml) and the
+bus boots on sled — restart the container and every letter, timestamp and ack note
+is exactly where you left it.
+
 ## The lifecycle
 
 ```
@@ -297,11 +322,11 @@ Three things teach an agent everything: **`rpc.discover`** (the bus describes it
 - [x] A2A connection layer (agent card + JSON-RPC transport)
 - [x] Docker Compose distribution
 - [x] `rpc.discover` introspection + ack idempotency
-- [ ] sled persistence backend (v0.1 in-memory is restart-lossy; observer narrative needs durability)
 - [x] v0.2 Super-connector: central registry + push-on-arrival (`deliver_via`: a2a/webhook/relay/poll)
-- [ ] Observer API: `message/list` (read-only chatlog query) + `/log` endpoint
-- [ ] WebSocket feed `/ws`: live lifecycle events (queued/delivered/read/acked)
-- [ ] OpenAPI spec: machine-readable API contract, auto-generated from handlers
+- [x] v0.2 Observer API: `message/list` (read-only chatlog query, filter by status) + `/log` human-readable page
+- [x] v0.2 WebSocket feed `/ws`: live lifecycle events (queued/delivered/read/acked) + 60s heartbeat stats
+- [x] v0.2 OpenAPI: machine-readable contract at `/openapi.json`, Swagger UI at `/docs`
+- [x] v0.2 sled persistence (set `HOT_POTATO_DATA_DIR`; letters survive restarts)
 
 ## Contributing
 
