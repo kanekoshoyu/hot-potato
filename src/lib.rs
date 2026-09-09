@@ -13,6 +13,7 @@
 //!    registration and inference endpoints is the transport layer's job,
 //!    not the bus's.
 
+pub mod deliver;
 pub mod error;
 pub mod message;
 pub mod bus;

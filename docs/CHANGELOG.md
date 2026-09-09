@@ -1,5 +1,29 @@
 # Changelog / 决策日志（nagoya 式：记下试过什么、什么成了、什么败了）
 
+## 2026-09-09 · v0.2 — Super-Connector（Sho 的架构定性）
+
+### 落地的
+- **中央注册制 + 推送投递**（`src/deliver.rs`，+reqwest）：agent 注册时可带
+  `description` + `deliver_via`（a2a / webhook / relay / poll 四种 transport）。
+  信到即推，**polling 降级为兜底**（未注册端点/调试/推送失败重试）。
+  推送失败不丢信——信留在队列，push outcome（Pushed/Failed/Skipped）随 send 响应返回。
+- **拓扑定性（Sho 四轮定义，全文见 RFC-002）**：①中央注册制——agent 只注册一次，
+  bus 透过注册表找到任何人（N 个 agent 不需要 N² 直连）②Bus 总线拓扑③事件驱动——
+  A2A 只是运输层，异步信件，不需要瞬时回复。
+- 21 项测试全绿（新增 4 项：registry roundtrip、poll-only 默认、push 成功路径、push 失败不致命）。
+- 版本 0.1.0 → 0.2.0。
+
+### 动机（为什么要做 push）
+v0.1 的乒乓失败复盘（workspace/pingpong-failure-analysis.md）：全天 44 封信里
+Patricia 主动发球仅 1 次，11 次长静默全是 Diana 打破——**被动邮箱拓扑 + 无心跳的
+响应式 agent = 乒乓不存在**。Sho 的诊断：拓扑里缺一个主动推送者。bus 本身就是
+router agent——它去推，而不是等人来取。
+
+### 边界（不是 bug，是设计）
+- push 失败永不致命：信不丢，退回 poll/retry。
+- router 不做内容级路由决策（第一版只按收件人投递）。
+- 消息原样转发，不做协议翻译。
+
 ## 2026-09-08 · v0.1 → v0.1.1
 
 ### 落地的

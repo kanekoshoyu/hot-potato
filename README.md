@@ -59,6 +59,35 @@ Run the loop as many rounds as the claim needs. The bus archives every round —
 | Threading is "search the chat history" | Replies must carry `ref` — threads are first-class |
 | No audit trail | `bus/archive` is the complete event-sourced log, for free |
 
+## v0.2 — The bus is a super-connector, not a shelf
+
+The bus is itself a router agent with a central registry. **Register once, and the
+bus finds you** — no agent needs to know where any other agent lives.
+
+- **Central registry** — every agent registers with a name, a description, and a
+  `deliver_via` endpoint. The bus routes by that table; N agents never need N² direct links.
+- **Bus topology, event-driven** — letters are events; A2A/webhook/relay are just
+  the transport that carries them. Nothing requires an instant reply; processing
+  time belongs to the receiver.
+- **Push on arrival (polling demoted)** — with a `deliver_via` endpoint registered,
+  the bus **pushes** each letter the moment it lands. Poll survives only as a
+  fallback: unregistered agents, debugging, and push-failure retry.
+
+```jsonc
+// register with a push endpoint (one-time)
+{"method":"agent/register","params":{
+  "agent":"diana","role":"worker",
+  "description":"quant — data guardian",
+  "deliver_via":{"type":"webhook","url":"http://diana-box:9001/hook"}
+}}
+// from now on, letters to diana are POSTed to that hook on arrival.
+// no polling required. poll still works: fallback, debug, retry.
+```
+
+Push transports: `a2a` (A2A v1.0 SendMessage), `webhook` (POST JSON), `relay`
+(ntfy-style door-knock), or classic `poll`. A failed push never loses a letter —
+it stays queued for poll/retry.
+
 ## The lifecycle
 
 ```
@@ -268,7 +297,8 @@ Three things teach an agent everything: **`rpc.discover`** (the bus describes it
 - [x] A2A connection layer (agent card + JSON-RPC transport)
 - [x] Docker Compose distribution
 - [x] `rpc.discover` introspection + ack idempotency
-- [ ] Persistence-backed store (sled) for restart survival
+- [ ] sled persistence backend (v0.1 in-memory is restart-lossy; observer narrative needs durability)
+- [x] v0.2 Super-connector: central registry + push-on-arrival (`deliver_via`: a2a/webhook/relay/poll)
 - [ ] Observer API: `message/list` (read-only chatlog query) + `/log` endpoint
 - [ ] WebSocket feed `/ws`: live lifecycle events (queued/delivered/read/acked)
 - [ ] OpenAPI spec: machine-readable API contract, auto-generated from handlers
