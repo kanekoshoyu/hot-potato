@@ -1,188 +1,193 @@
 #!/usr/bin/env python3
-"""Hot Potato Monitor — GPS for every potato. v2 (alarms fixed)
+"""Hot Potato Monitor v3 — GPS for every potato, spam-proof.
 
-Subscribes to the bus /ws feed, tracks each letter's lifecycle position, and
-mirrors every transition to Sho's TG.
+v3 fixes (after two spam incidents):
+1. Single-instance lock via pidfile — second instance exits immediately.
+2. Alarmed-state persisted to disk — restarts never re-alarm.
+3. Startup scan NEVER alarms: baseline letters are silent history. Only
+   letters BORN while the monitor runs (or transitions seen live) can
+   trigger alarms, and each (id,status) alarms at most once, ever.
+4. Letters to sho excluded (human mailbox, bridge reads them).
 
-v2 alarm rules (after the 40-message spam incident):
-- age = letter's created_at (real age), NOT monitor-first-seen time
-- NEVER alarm on letters addressed to sho (human; bridge reads those)
-- never alarm on acked/read letters (lifecycle finished)
-- one alarm per (letter, status): re-arm only when status changes
-- market noise guard: don't alarm on broadcast/onboarding-type letters older
-  than the monitor's own birth (historical archive letters are reviewed, not pending)
-
-Run:  nohup python3 potato-monitor.py >> /tmp/potato-monitor.log 2>&1 &
+Sends via dedicated bot: MONITOR_BOT_TOKEN in ~/.hermes/.env -> chat 5690144164.
 """
 import json
+import os
 import time
-import subprocess
 import threading
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-try:
-    import websocket  # websocket-client
-except ImportError:
-    subprocess.run(["pip", "install", "--quiet", "websocket-client"], check=False)
-    import websocket
+import websocket  # websocket-client
 
 BUS_WS = "ws://localhost:8080/ws"
 BUS_HTTP = "http://localhost:8080"
-TG_CHAT_ID = "5690144164"  # Sho
+TG_CHAT_ID = "5690144164"
+STATE_PATH = "/tmp/potato-monitor-state.json"
+PID_PATH = "/tmp/potato-monitor.pid"
 
-def tg_api(text: str):
-    """Send via the dedicated monitor bot (MONITOR_BOT_TOKEN in ~/.hermes/.env)."""
-    import os, urllib.request, urllib.parse
+INITIALS = {"patricia": "P", "diana": "D", "victoria": "V",
+            "isabella": "I", "anastasia": "A", "sho": "S"}
+
+QUEUED_ALARM_MIN = 30
+DELIVERED_ALARM_MIN = 60
+
+potatoes = {}   # id -> {sender, receiver, subject, status}
+alarmed = set() # (id, status) — persisted
+known = set()   # ids present at startup = silent history
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def tg(text):
     token = None
     for line in open(os.path.expanduser("~/.hermes/.env")):
         if line.startswith("MONITOR_BOT_TOKEN="):
             token = line.strip().split("=", 1)[1]
             break
     if not token:
-        log("MONITOR_BOT_TOKEN missing from ~/.hermes/.env — cannot send")
+        log("MONITOR_BOT_TOKEN missing — cannot send")
         return
     data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": text}).encode()
     try:
-        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
-        urllib.request.urlopen(req, timeout=15)
+        urllib.request.urlopen(
+            urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data),
+            timeout=15)
     except Exception as e:
-        log(f"TG API send failed: {e}")
-
-INITIALS = {
-    "patricia": "P", "diana": "D", "victoria": "V",
-    "isabella": "I", "anastasia": "A", "sho": "S",
-}
-
-QUEUED_ALARM_MIN = 30     # queued this long without delivery
-DELIVERED_ALARM_MIN = 60  # delivered this long without ack
-
-potatoes = {}   # id -> {sender, receiver, subject, status, created_at}
-alarmed = set() # (id, status) pairs already alarmed
+        log(f"TG failed: {e}")
 
 
-def initials(name: str) -> str:
-    return INITIALS.get(name.lower(), name[:2].upper())
+def save_state():
+    json.dump({"alarmed": sorted(f"{i}|{s}" for i, s in alarmed),
+               "potatoes": potatoes},
+              open(STATE_PATH, "w"))
 
 
-def tg(text: str):
-    tg_api(text)
+def load_state():
+    global alarmed, potatoes
+    if os.path.exists(STATE_PATH):
+        d = json.load(open(STATE_PATH))
+        alarmed = {tuple(x.split("|", 1)) for x in d.get("alarmed", [])}
+        potatoes = d.get("potatoes", {})
+        log(f"state restored: {len(potatoes)} potatoes, {len(alarmed)} alarms remembered")
 
 
-def log(msg: str):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+def initials(n):
+    return INITIALS.get(n.lower(), n[:2].upper())
 
 
-def fmt_flow(m: dict) -> str:
+def fmt(m):
     return f"[{initials(m['sender'])}->{initials(m['receiver'])}] {m['subject'][:50]}"
 
 
-def alarm_eligible(m: dict) -> bool:
-    """Alarms only make sense for agent mailboxes mid-lifecycle."""
-    if m["receiver"].lower() == "sho":
-        return False  # human mailbox; the mail bridge reads those
-    if m["status"] in ("acked", "read"):
-        return False  # done or in-progress-visible
-    return True
+def bus(payload):
+    req = urllib.request.Request(
+        f"{BUS_HTTP}/", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
 
 
-def age_minutes(m: dict) -> float:
-    """Real age: from the letter's own created_at, not when monitor first saw it."""
+def age_min(created_at):
     try:
-        created = datetime.fromisoformat(
-            m["created_at"].replace("Z", "+00:00"))
-        return (datetime.now(timezone.utc) - created).total_seconds() / 60
+        d = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - d).total_seconds() / 60
     except Exception:
         return 0.0
 
 
-def maybe_alarm(mid: str, m: dict):
-    if (mid, m["status"]) in alarmed:
+def on_event(ev):
+    ev_type = ev.get("event")
+    if ev_type in ("hello", "heartbeat", "lagged"):
         return
-    if not alarm_eligible(m):
-        return
-    age = age_minutes(m)
-    if m["status"] == "queued" and age > QUEUED_ALARM_MIN:
-        tg(f"⚠️ 🥔 {mid[:8]} {fmt_flow(m)} — queued {age:.0f}min, "
-           f"{initials(m['receiver'])} hasn't picked it up.")
-        alarmed.add((mid, m["status"]))
-    elif m["status"] == "delivered" and age > DELIVERED_ALARM_MIN:
-        tg(f"⚠️ 🥔 {mid[:8]} {fmt_flow(m)} — delivered {age:.0f}min ago, no ack. "
-           f"{initials(m['receiver'])} still holding it.")
-        alarmed.add((mid, m["status"]))
-
-
-def on_event(ev: dict):
-    if ev.get("event") in ("hello", "heartbeat", "lagged"):
-        return
-    mid, new_status = ev.get("id"), ev.get("event")
+    mid = ev.get("id")
     if not mid:
         return
+
     if mid not in potatoes:
-        # first sight: record state silently; only announce if it's NOT the
-        # initial queued state (a brand-new letter's queued hop is announced
-        # only when we see it born live, and even then once)
-        potatoes[mid] = {
-            "sender": ev.get("sender", "?"),
-            "receiver": ev.get("receiver", "?"),
-            "subject": ev.get("subject", "?"),
-            "status": new_status,
-            "created_at": ev.get("at"),
-        }
-        if new_status != "queued":
-            m = potatoes[mid]
-            tg(f"🥔 {mid[:8]} {fmt_flow(m)} — {new_status.upper()}")
-        log(f"{mid[:8]} first-seen as {new_status}")
-        maybe_alarm(mid, potatoes[mid])
+        # letter born while monitor runs — this one is LIVE and can alarm later
+        potatoes[mid] = {"sender": ev.get("sender", "?"),
+                         "receiver": ev.get("receiver", "?"),
+                         "subject": ev.get("subject", "?"),
+                         "status": ev_type}
+        if ev_type == "queued":
+            tg(f"🥔 NEW {mid[:8]} {fmt(potatoes[mid])} — queued")
+        log(f"{mid[:8]} new letter ({ev_type})")
+        save_state()
         return
+
     prev = potatoes[mid].get("status")
-    if prev == new_status:
-        return  # duplicate event — same status, nothing to announce
-    potatoes[mid]["status"] = new_status
-    log(f"{mid[:8]} {prev} -> {new_status}")
-    m = potatoes[mid]
-    tg(f"🥔 {mid[:8]} {fmt_flow(m)} — {new_status.upper()}")
-    maybe_alarm(mid, m)
+    if prev == ev_type:
+        return  # duplicate event
+    potatoes[mid]["status"] = ev_type
+    log(f"{mid[:8]} {prev} -> {ev_type}")
+    if ev_type in ("delivered", "read", "acked"):
+        tg(f"🥔 {mid[:8]} {fmt(potatoes[mid])} — {ev_type.upper()}")
+    maybe_alarm_stuck(mid)
+    save_state()
 
 
-def snapshot():
-    """Baseline: load real created_at ages; alarm only true stuck agent mail."""
-    req = urllib.request.Request(
-        f"{BUS_HTTP}/",
-        data=json.dumps({"jsonrpc": "2.0", "id": 1,
-                         "method": "message/list", "params": {}}).encode(),
-        headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        msgs = json.loads(r.read())["result"]
-    stuck = 0
-    for m in msgs:
-        potatoes[m["id"]] = {
-            "sender": m["sender"], "receiver": m["receiver"],
-            "subject": m["subject"], "status": m["status"],
-            "created_at": m["created_at"],
-        }
-    # one-time stuck scan (not spamming: only letters that are truly stale NOW)
-    for mid, m in potatoes.items():
-        age = age_minutes(m)
-        if alarm_eligible(m):
-            if m["status"] == "queued" and age > QUEUED_ALARM_MIN * 4:  # >2h only at startup
-                tg(f"⚠️ 🥔 {mid[:8]} {fmt_flow(m)} — queued {age/60:.0f}h (startup scan). "
-                   f"{initials(m['receiver'])} never picked it up.")
-                stuck += 1
-            elif m["status"] == "delivered" and age > DELIVERED_ALARM_MIN * 8:  # >8h
-                tg(f"⚠️ 🥔 {mid[:8]} {fmt_flow(m)} — delivered {age/60:.0f}h ago, never acked "
-                   f"(startup scan). {initials(m['receiver'])} still holding.")
-                stuck += 1
-    return len(msgs), stuck
+def maybe_alarm_stuck(mid):
+    """Alarm only live-born letters stuck mid-lifecycle, once per (id,status)."""
+    m = potatoes.get(mid)
+    if not m or (mid, m["status"]) in alarmed:
+        return
+    if m["receiver"].lower() == "sho" or m["status"] in ("acked", "read"):
+        return
+    created = m.get("created_at")
+    if not created:
+        return
+    age = age_min(created)
+    if m["status"] == "queued" and age > QUEUED_ALARM_MIN:
+        tg(f"⚠️ 🥔 {mid[:8]} {fmt(m)} — queued {age:.0f}min, "
+           f"{initials(m['receiver'])} hasn't picked it up.")
+        alarmed.add((mid, m["status"]))
+        save_state()
+    elif m["status"] == "delivered" and age > DELIVERED_ALARM_MIN:
+        tg(f"⚠️ 🥔 {mid[:8]} {fmt(m)} — delivered {age:.0f}min, no ack. "
+           f"{initials(m['receiver'])} still holding it.")
+        alarmed.add((mid, m["status"]))
+        save_state()
+
+
+def watchdog():
+    while True:
+        time.sleep(600)
+        for mid in list(potatoes):
+            maybe_alarm_stuck(mid)
+
+
+def acquire_lock():
+    if os.path.exists(PID_PATH):
+        old = open(PID_PATH).read().strip()
+        try:
+            os.kill(int(old), 0)  # alive?
+            log(f"another monitor (pid {old}) already running — exiting")
+            raise SystemExit(0)
+        except (ProcessLookupError, ValueError):
+            pass  # stale pidfile
+    open(PID_PATH, "w").write(str(os.getpid()))
 
 
 def main():
-    n, stuck = snapshot()
-    log(f"monitor v2 started: {n} potatoes baseline, {stuck} true-stale flagged. watching /ws ...")
+    acquire_lock()
+    load_state()
+
+    # baseline: everything currently on the bus is SILENT history
+    msgs = bus({"jsonrpc": "2.0", "id": 1, "method": "message/list", "params": {}})["result"]
+    for m in msgs:
+        if m["id"] not in potatoes:
+            potatoes[m["id"]] = {"sender": m["sender"], "receiver": m["receiver"],
+                                 "subject": m["subject"], "status": m["status"]}
+    save_state()
+    log(f"monitor v3 started: {len(potatoes)} potatoes as silent baseline. watching /ws ...")
+    tg("🥔 Monitor v3 online (spam-proof: single instance, persisted alarms, live-born letters only).")
 
     threading.Thread(target=watchdog, daemon=True).start()
-
-    while True:  # auto-reconnect loop
+    while True:
         try:
             ws = websocket.create_connection(BUS_WS, timeout=10)
             ws.settimeout(30)
@@ -200,16 +205,8 @@ def main():
                 except (json.JSONDecodeError, TypeError):
                     pass
         except Exception as e:
-            log(f"ws dropped ({e}); reconnecting in 15s ...")
+            log(f"ws dropped ({e}); reconnect in 15s")
             time.sleep(15)
-
-
-def watchdog():
-    """Every 10 min: alarm only NEW staleness (age crossing threshold), real ages only."""
-    while True:
-        time.sleep(600)
-        for mid, m in list(potatoes.items()):
-            maybe_alarm(mid, m)
 
 
 if __name__ == "__main__":
