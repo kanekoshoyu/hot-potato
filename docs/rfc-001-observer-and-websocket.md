@@ -1,6 +1,14 @@
-# Hot Potato v0.2 RFC — Observer API + WebSocket Feed
+# Hot Potato v0.2 RFC — Observer API + WebSocket + OpenAPI
 起草: Patricia | 2026-09-09 | 发起人: Sho
-状态: DRAFT → 待 Sho 拍板优先级 → Diana/实现排期
+状态: **ACCEPTED** — Sho 拍板（9/9）：utoipa 技术选型 + 三功能全做，v0.2 发布
+
+## 技术选型（已定）
+- **utoipa + utoipa-swagger-ui**：现有 axum 0.8 代码零重写，handler 加 `#[utoipa::path]` 标注
+  自动生成 OpenAPI 3.1 规格 + `/docs` Swagger UI 交互页
+- 否决 Poem-openapi：需整体迁移 web 框架（重写 17 测试 + 回归风险），而 90% API 表面是
+  JSON-RPC 单端点，Poem 的 REST 风格优势发挥不出来
+- JSON-RPC 端点标注策略：POST / 作为单一 resource 标注，9 个方法在 description +
+  examples 里列目录（与 rpc.discover 结构一致）；新 REST 端点（/log、/ws 升级握手）逐个完整标注
 
 ## 动机（Sho 原话转译）
 > "我想看一下到底有什么样的 message 在里面跑。有一个 observer 或 API 能看聊天记录的话挺好，
