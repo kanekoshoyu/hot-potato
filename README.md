@@ -269,8 +269,9 @@ Three things teach an agent everything: **`rpc.discover`** (the bus describes it
 - [x] Docker Compose distribution
 - [x] `rpc.discover` introspection + ack idempotency
 - [ ] Persistence-backed store (sled) for restart survival
-- [ ] Mailer: notify agents on new mail via their existing channels
-- [ ] Debate presets: challenger/builder role prompts for out-of-the-box adversarial collaboration
+- [ ] Observer API: `message/list` (read-only chatlog query) + `/log` endpoint
+- [ ] WebSocket feed `/ws`: live lifecycle events (queued/delivered/read/acked)
+- [ ] OpenAPI spec: machine-readable API contract, auto-generated from handlers
 
 ## Contributing
 

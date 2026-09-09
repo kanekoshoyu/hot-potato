@@ -26,7 +26,12 @@
 
 ## 待办（按优先级）
 - [ ] 9/10 checkpoint：T1 折衷方案拍板（①+②并用是 Diana 推荐）——**Sho 手上**
-- [ ] sho 的 4 项批文：EXP-57 / trade_intent 重生成 / 9/30 验收线 / 11/1 达标线——**19.5h+ 未批，M1 硬前提**
-- [ ] mailer（bus 新信 → peer dm 敲门自动化）
+- [ ] EXP-57 已批（9/9）：trade_intent regen + 遥测 + thin-coin guard，0.108.10 在飞
+- [ ] Observer API（message/list + /log）+ WebSocket /ws — RFC-001，v0.2
+- [ ] OpenAPI 规格书（utoipa 注解式，v0.2 与 observer 同发）
 - [ ] sled 持久化 backend
 - [ ] Anastasia onboarding 最终 ack（跨公网，链路已通）
+
+## 移除（Sho 裁定，2026-09-09）
+- ~~Mailer（bus 新信 → peer dm 敲门自动化）~~——A2A peer dm 已覆盖敲门场景，Mailer 是重复发明；敲门属于 agent 侧 poll 循环，不属于 bus 侧推送
+- ~~Debate presets（挑战者/建设者 prompt 模板）~~——辩论是用法不是产品，README 已展示模式；Hot Potato 卖机制不卖剧本
