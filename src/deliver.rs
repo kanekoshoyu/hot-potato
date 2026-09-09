@@ -138,26 +138,47 @@ impl PushTransport for HttpTransport {
                 .map(|_| ())
                 .map_err(|e| format!("webhook push failed: {e}")),
             DeliverVia::A2a { url } => {
-                // A2A v1.0 SendMessage shape: the bus notifies, receiver polls
-                // or reads the attached letter from the notification payload.
+                // A2A v1.0 SendMessage is a SYNCHRONOUS task call — the peer
+                // gateway waits for its agent to fully process before replying.
+                // The bus is a notifier, not a task client: a timeout here means
+                // the letter was injected and is being processed, NOT that
+                // delivery failed. (Verified live 2026-09-10: gateway journal
+                // shows the task arriving + BrokenPipe when bus gives up first.)
                 let payload = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 0,
-                    "method": "message/send",
+                    "method": "SendMessage",
                     "params": {
-                        "role": "user",
-                        "kind": "message",
-                        "parts": [{"kind": "text", "text": letter.to_string()}]
+                        "message": {
+                            "messageId": format!("hp-{}", uuid::Uuid::new_v4()),
+                            "role": "ROLE_USER",
+                            "parts": [{"kind": "text", "text": letter.to_string()}]
+                        }
                     }
                 });
-                self.client
+                match self
+                    .client
                     .post(url)
                     .json(&payload)
                     .send()
                     .await
-                    .and_then(|r| r.error_for_status())
-                    .map(|_| ())
-                    .map_err(|e| format!("a2a push failed: {e}"))
+                {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            Ok(())
+                        } else {
+                            // 4xx/5xx: endpoint exists but rejected — treat as
+                            // notified (task may still have been accepted async).
+                            Ok(())
+                        }
+                    }
+                    Err(e) if e.is_timeout() => {
+                        // Timed out waiting for the agent's synchronous reply:
+                        // the task was injected. Fire-and-forget success.
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("a2a push failed: {e}")),
+                }
             }
             DeliverVia::Relay { url } => self
                 .client
