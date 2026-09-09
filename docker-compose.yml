@@ -2,8 +2,10 @@ services:
   hot-potato:
     build: .
     container_name: hot-potato
-    ports:
-      - "8080:8080"
+    # host network: the fleet's A2A endpoints (hermes gateways) listen on
+    # 127.0.0.1:864X, so bridge networking can't reach them for push-on-arrival.
+    # host mode lets the bus dial localhost:864X directly. Port 8080 stays as-is.
+    network_mode: host
     environment:
       HOT_POTATO_NAME: hot-potato
       HOT_POTATO_DESCRIPTION: "EventMessageBus for AI agents - a mailbox with a state machine"
