@@ -123,6 +123,18 @@ impl BusStore for SledStore {
         Ok(out)
     }
 
+    async fn mark_delivered(&self, agent: &str, id: &str) -> BusResult<Message> {
+        let now = chrono::Utc::now();
+        self.update_one(agent, id, |m| {
+            if m.status == MessageStatus::Queued {
+                m.status = MessageStatus::Delivered;
+                m.delivered_at = Some(now);
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
         self.update_one(agent, id, |m| {
             if m.status != MessageStatus::Delivered {

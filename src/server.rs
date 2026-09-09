@@ -229,11 +229,15 @@ async fn rpc(
                             hub.emit("queued", &letter);
                             // Push-on-arrival (RFC-002): fire-and-forget — a push
                             // failure never blocks the send or loses the letter.
+                            // On success (or a2a "notified" semantics), mark the
+                            // letter delivered: it left the shelf without a poll.
                             let registry = registry.clone();
+                            let bus2 = bus.clone();
                             let transport: Arc<dyn crate::deliver::PushTransport> =
                                 Arc::new(crate::deliver::HttpTransport::new());
                             let push_letter = serde_json::to_value(&letter).expect("letter json");
                             let push_receiver = receiver.clone();
+                            let push_id = id.clone();
                             tokio::spawn(async move {
                                 let outcome = crate::deliver::dispatch_push(
                                     &registry,
@@ -242,8 +246,20 @@ async fn rpc(
                                     &push_letter,
                                 )
                                 .await;
-                                if let crate::deliver::PushOutcome::Failed { error } = outcome {
-                                    eprintln!("🥔 push failed for {push_receiver}: {error}");
+                                match outcome {
+                                    crate::deliver::PushOutcome::Pushed => {
+                                        if let Ok(m) =
+                                            bus2.mark_delivered(&push_receiver, &push_id).await
+                                        {
+                                            hub.emit("delivered", &m);
+                                        }
+                                    }
+                                    crate::deliver::PushOutcome::Failed { error } => {
+                                        eprintln!(
+                                            "🥔 push failed for {push_receiver}: {error}"
+                                        );
+                                    }
+                                    crate::deliver::PushOutcome::Skipped { .. } => {}
                                 }
                             });
                             json!({"id": id})

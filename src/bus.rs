@@ -107,6 +107,13 @@ impl EventBus {
         self.store.poll(agent, limit).await
     }
 
+    /// Push-on-arrival receipt: the bus delivered this letter to the agent's
+    /// endpoint, so it's "delivered" without a poll (RFC-002).
+    pub async fn mark_delivered(&self, agent: &str, id: &str) -> BusResult<Message> {
+        self.ensure_registered(agent).await?;
+        self.store.mark_delivered(agent, id).await
+    }
+
     /// Read receipt: I opened it (chatlog `read_at` timestamp).
     pub async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
         self.ensure_registered(agent).await?;
