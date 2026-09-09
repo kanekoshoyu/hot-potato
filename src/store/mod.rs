@@ -28,6 +28,11 @@ pub trait BusStore: Send + Sync {
     /// Order: FIFO by creation time.
     async fn poll(&self, agent: &str, limit: usize) -> BusResult<Vec<Message>>;
 
+    /// Mark exactly one queued letter delivered — push-on-arrival receipt
+    /// (RFC-002): the bus pushed it to the agent's endpoint, so it has
+    /// "left the shelf" without a poll.
+    async fn mark_delivered(&self, agent: &str, id: &str) -> BusResult<Message>;
+
     /// Mark one delivered message as read (chatlog receipt: `read_at` set).
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message>;
 

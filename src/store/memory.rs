@@ -82,6 +82,25 @@ impl BusStore for InMemoryStore {
         Ok(out)
     }
 
+    async fn mark_delivered(&self, agent: &str, id: &str) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let now = chrono::Utc::now();
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        // push receipt: queued -> delivered (idempotent if already delivered)
+        if m.status == MessageStatus::Queued {
+            m.status = MessageStatus::Delivered;
+            m.delivered_at = Some(now);
+        }
+        Ok(m.clone())
+    }
+
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
         let mut inner = self.inner.write().expect("store poisoned");
         let box_ = inner
