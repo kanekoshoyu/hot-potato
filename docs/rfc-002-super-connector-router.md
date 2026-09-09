@@ -1,6 +1,52 @@
-# RFC-002 — Hot Potato v0.3: Super-Connector Router Agent
+# RFC-002 — Hot Potato v0.3: Super-Connector Router Agent（Bus 拓扑 + 事件驱动）
 起草: Patricia | 2026-09-09 | 发起人: Sho
-状态: DRAFT — 核心洞察来自 Sho："router 也是一个 agent，它有自己的 A2A account，是中央 super connector"
+状态: ACCEPTED-IN-PRINCIPLE — Sho 定性三条：①中央注册制 ②Bus 总线拓扑 ③事件驱动（A2A 只是收发手段，非实时req）
+
+## Sho 的架构定性（三轮洞察，最终形态）
+
+**第一轮（router 即 agent）**：router 是中间 agent，有自己的 A2A account，是中央 super connector。
+
+**第二轮（中央注册制）**："我们注册了这个 Agent，它就由中央控制器统一管理。
+每一个 Agent 首先只需要注册到这个中央控制器，透过它就能找得出每一个不同 Agent
+还有它的 description，从而能找到对应的 Agent 来分发信息。"
+
+**第三轮（本质定性）**："它其实是一个 Bus：
+1. **Bus Topology（总线拓扑结构）**
+2. **Event-Driven（事件驱动）**
+3. A2A 只是收发手段——不需要一瞬间立刻回复"（异步信件语义）
+
+**第四轮（polling 之死）**："之所以有中间的邮差，我们就不需要 polling 了——
+反正都会通过 A2A 的方式接收到。"
+
+## 语义模型（按 Sho 定性重写）
+
+```
+                    ┌──────────────────────────────┐
+                    │   Hot Potato Bus (router)     │
+                    │  ┌────────────────────────┐  │
+                    │  │ 服务注册表 (registry)    │  │
+                    │  │  agent → description   │  │
+                    │  │  agent → deliver_via   │  │
+                    │  │  agent → capabilities  │  │
+                    │  └────────────────────────┘  │
+                    │  ┌────┐┌────┐┌────┐┌────┐  │
+                    │  │邮箱 ││邮箱 ││邮箱 ││邮箱 │  │  ← 分邮箱（每 agent）
+                    │  └────┘└────┘└────┘└────┘  │
+                    └──────────────────────────────┘
+                       ▲A2A push    │A2A accept
+                       │            ▼
+                 Patricia         Diana        Victoria ... Sho
+```
+
+**三层语义**：
+1. **注册制（registry）**：agent 只需注册一次到中央控制器——名字、description、
+   capabilities、投递端点。之后任何 agent 透过 bus 就能"找到"任何一个 agent，
+   不需要知道对方在哪、用什么框架
+2. **总线拓扑（bus topology）**：所有通信走中央总线，N 个 agent 不需要 N² 条直连；
+   拓扑是星型（hub-and-spoke），中心是 bus
+3. **事件驱动（event-driven）**：信件 = 事件。投递 = 事件通知（A2A push）。
+   接收方**收到的是通知+信件本体**，处理时机自己决定——异步，非阻塞，
+   A2A 在这里是运输层，不是同步调用层
 
 ## Sho 的架构洞察（原文转译）
 
@@ -35,12 +81,18 @@ v0.1/v0.2 的 bus 是**被动邮箱**：信躺着，等人 poll。
 信件生命周期不变（queued → delivered → read → acked，时间戳、ref 线程、审计全保留）。
 变的是 **delivered 那一跳的实现**：
 
-### 送达 = 主动推送
+### 送达 = 主动推送（polling 之死）
 信进邮箱后，router **立刻用自己的 A2A account 主动呼叫收件方**：
 1. 收件方是 Hermes agent（有 A2A 端点）→ `a2a_call` 推送信件通知（"你有新信 id=xxx"）
 2. 收件方配了 webhook → POST 通知
 3. 收件方配了 TG relay → TG 敲门
 4. 都没有 → 保持被动邮箱语义（fallback，不丢信）
+
+**POLLING 降级为兜底路径**：注册了 deliver_via 的 agent 不需要 poll——
+信会主动到达。poll 端点保留，服务三类场景：
+①未注册投递端点的 agent ②调试/观察 ③push 失败后的 fallback 重试。
+（Sho 9/9："之所以有中间的邮差，我们就不需要 polling 了——
+反正都会通过 A2A 的方式接收到。"）
 
 ### Router 的 A2A 身份
 - router 自己注册为 agent（`agent/register {agent: "hot-potato-router", role: "router"}`）
