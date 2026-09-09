@@ -133,7 +133,7 @@ async fn discover() -> Value {
 
 /// JSON-RPC handler — the single endpoint agents talk to.
 async fn rpc(
-    State((bus, hub, config)): State<BusState>,
+    State((bus, hub, config, registry)): State<BusState>,
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
@@ -158,10 +158,38 @@ async fn rpc(
             parse2(&req.params, ["agent", "role"], |p, agent, role| {
                 let role = if role == "pm" { Role::Pm } else { Role::Worker };
                 let agent = agent.to_string();
+                // Delivery registration (RFC-002): optional description + deliver_via.
+                let deliver_via: crate::deliver::DeliverVia = match p.get("deliver_via") {
+                    Some(Value::String(s)) if s == "a2a" || s == "webhook" || s == "relay" => {
+                        let url = p
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        match s.as_str() {
+                            "a2a" => crate::deliver::DeliverVia::A2a { url },
+                            "webhook" => crate::deliver::DeliverVia::Webhook { url },
+                            _ => crate::deliver::DeliverVia::Relay { url },
+                        }
+                    }
+                    _ => crate::deliver::DeliverVia::Poll,
+                };
+                let description = p
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let registry = registry.clone();
                 async move {
+                    let entry = registry.register(&agent, &description, deliver_via).await;
                     bus.register(&agent, role)
                         .await
-                        .map(|_| json!({"registered": agent}))
+                        .map(|_| {
+                            json!({
+                                "registered": agent,
+                                "deliver_via": entry.deliver_via,
+                            })
+                        })
                         .map_err(|e| e.to_string())
                 }
             })
@@ -190,17 +218,34 @@ async fn rpc(
                     bus.send(&sender, &receiver, mt, &subject, &body, r#ref)
                         .await
                         .map(|id| {
-                            hub.emit(
-                                "queued",
-                                &crate::message::Message::new(
-                                    sender.clone(),
-                                    receiver.clone(),
-                                    mt,
-                                    subject.clone(),
-                                    body.clone(),
-                                    None,
-                                ),
+                            let letter = crate::message::Message::new(
+                                sender.clone(),
+                                receiver.clone(),
+                                mt,
+                                subject.clone(),
+                                body.clone(),
+                                None,
                             );
+                            hub.emit("queued", &letter);
+                            // Push-on-arrival (RFC-002): fire-and-forget — a push
+                            // failure never blocks the send or loses the letter.
+                            let registry = registry.clone();
+                            let transport: Arc<dyn crate::deliver::PushTransport> =
+                                Arc::new(crate::deliver::HttpTransport::new());
+                            let push_letter = serde_json::to_value(&letter).expect("letter json");
+                            let push_receiver = receiver.clone();
+                            tokio::spawn(async move {
+                                let outcome = crate::deliver::dispatch_push(
+                                    &registry,
+                                    &transport,
+                                    &push_receiver,
+                                    &push_letter,
+                                )
+                                .await;
+                                if let crate::deliver::PushOutcome::Failed { error } = outcome {
+                                    eprintln!("🥔 push failed for {push_receiver}: {error}");
+                                }
+                            });
                             json!({"id": id})
                         })
                         .map_err(|e| e.to_string())
@@ -436,7 +481,7 @@ async fn health() -> impl IntoResponse {
 /// GET /log?limit=N — human-readable lifecycle page (RFC-001 F2).
 /// The chatlog view: every letter on the bus, newest last, one line each.
 async fn log_page(
-    State((bus, _hub, _config)): State<BusState>,
+    State((bus, _hub, _config, _registry)): State<BusState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let msgs = bus.list_all().await.unwrap_or_default();
@@ -475,12 +520,19 @@ async fn log_page(
     )
 }
 
-/// Shared app state: the bus, its config, and the ws event hub.
-pub type BusState = (Arc<EventBus>, Arc<EventHub>, Arc<ServerConfig>);
+/// Shared app state: the bus, its config, the ws event hub, and the delivery
+/// registry that makes push-on-arrival real (RFC-002).
+pub type BusState = (
+    Arc<EventBus>,
+    Arc<EventHub>,
+    Arc<ServerConfig>,
+    Arc<crate::deliver::Registry>,
+);
 
 /// Build the router (exposed for tests + compose).
 pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
     let hub = Arc::new(EventHub::new());
+    let registry = Arc::new(crate::deliver::Registry::new());
     let card = config.agent_card();
     let app = crate::ws::router()
         .route("/log", get(log_page))
@@ -492,7 +544,7 @@ pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
                 Json(serde_json::to_value(card.clone()).expect("card serializes"))
             }),
         )
-        .with_state((bus, hub, config));
+        .with_state((bus, hub, config, registry));
     let swagger = utoipa_swagger_ui::SwaggerUi::new("/docs")
         .url("/openapi.json", crate::openapi::openapi_doc());
     app.merge(swagger)
