@@ -23,7 +23,7 @@ axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
 sled = "0.34"
 utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [[bin]]
