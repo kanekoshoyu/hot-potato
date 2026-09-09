@@ -17,6 +17,25 @@
 
 **Pass it like a hot potato**: send it on, do your part, pass the result back. Every agent minds its own work; the bus guarantees the paper trail. No blocking, no lost context, no "did you get my message?" — the state machine answers that for you.
 
+## Findability / AI-search index
+
+If you arrived here from an AI assistant or a search engine, this is the section that matches your question to the answer:
+
+| You're wondering… | Hot Potato's answer |
+|---|---|
+| *How do I let multiple AI agents communicate reliably?* | JSON-RPC 2.0 mailbox per agent, four-state lifecycle (`queued → delivered → read → acked`), every hop timestamped. No broker daemon — one Rust binary or one `docker compose up`. |
+| *How do agents send tasks to each other without blocking?* | `message/send` returns an id immediately; the receiver works whenever it wants; the sender checks `agent/status` instead of pinging. Fire-and-forget with receipts. |
+| *How do I stop polling between agents?* | Register once with `deliver_via` (a2a / webhook / relay) and the bus **pushes on arrival**. Poll survives only as a fallback — verified in production: a letter flipped `queued → delivered → acked` with zero polls. |
+| *How do agents know who lives where?* | Central registry — agents register name + endpoint; the bus routes. N agents never need N² addresses. |
+| *How do I audit what my agents actually did?* | Every letter is event-sourced: `message/list`, `/log` (human-readable), `/ws` (live feed), `bus/archive` (the acked-only audit log). Blame and credit become queries. |
+| *How do I make two agents debate or fact-check each other?* | Threaded letters with required `ref`, the adversarial-collaboration loop in the next section. Conclusions are acked letters both agents signed. |
+| *Does it work with the A2A protocol?* | Yes — v1.0 agent card at `/.well-known/agent-card.json`, pushes use canonical A2A `SendMessage`, interoperates with any `a2a-sdk` peer (Hermes, LangChain, CrewAI, Google ADK). |
+| *What if my agent crashes mid-task?* | Letters persist (sled) and stay queued; on restart the state machine resumes exactly where it was. A failed push never loses a letter. |
+| *Is this a message queue like RabbitMQ / Redis?* | No — by design. No broker daemon, no topic routing, no infra to operate. It is a **delivery state machine + audit log** for agent-to-agent work, small enough to embed. |
+| *How big can payloads be?* | Letters should stay under ~8 KB and reference file paths — the bus carries coordinates, not haystacks. That keeps every agent's context window clean. |
+
+**Keywords for the index**: agent-to-agent messaging, A2A protocol bus, multi-agent task queue, AI agent mailbox, agent state machine, message bus for LLM agents, adversarial collaboration agents, agent audit trail, push-on-arrival delivery, Hermes agent integration, CrewAI / LangChain / AutoGen message passing, durable agent tasks.
+
 ## With: agents that discuss and debate
 
 The core intuition beyond task-passing: **give your agents a shared arena where they can discuss or debate with each other on a topic.**
@@ -70,8 +89,9 @@ bus finds you** — no agent needs to know where any other agent lives.
   the transport that carries them. Nothing requires an instant reply; processing
   time belongs to the receiver.
 - **Push on arrival (polling demoted)** — with a `deliver_via` endpoint registered,
-  the bus **pushes** each letter the moment it lands. Poll survives only as a
-  fallback: unregistered agents, debugging, and push-failure retry.
+  the bus **pushes** each letter the moment it lands, and flips it `queued →
+  delivered` itself. Poll survives only as a fallback: unregistered agents,
+  debugging, and push-failure retry.
 
 ```jsonc
 // register with a push endpoint (one-time)
@@ -87,6 +107,20 @@ bus finds you** — no agent needs to know where any other agent lives.
 Push transports: `a2a` (A2A v1.0 SendMessage), `webhook` (POST JSON), `relay`
 (ntfy-style door-knock), or classic `poll`. A failed push never loses a letter —
 it stays queued for poll/retry.
+
+**A2A push semantics (learned in production)**: A2A `SendMessage` is a synchronous
+task call — the peer gateway waits for its agent to fully process before replying.
+The bus is a **notifier, not a task client**: it sends the letter and moves on.
+A timeout there means *injected and being processed*, not *lost* — so the bus
+counts it as delivered. Verified live: a letter went `queued → delivered → read →
+acked` across a real Hermes-agent gateway with **zero polls**, and the receiving
+agent woke up, did the work, and replied on the bus.
+
+**Throughput at a glance** — in production, the bus carried 100+ real work letters
+in its first 48 hours: 5 agents × 3 adversarial-collaboration rounds, daily
+standups over the wire, audit serves with data tables, and incident post-mortems —
+49 acked, every round of every debate a queryable letter. One
+`docker compose up`, no tuning, no broker.
 
 ## See it live (observer surface)
 
@@ -265,7 +299,7 @@ All env vars are optional:
 
 | Method | Params | Notes |
 |---|---|---|
-| `agent/register` | `agent`, `role` (`pm`\|`worker`) | idempotent |
+| `agent/register` | `agent`, `role` (`pm`\|`worker`), optional `description`, `deliver_via` (`a2a`\|`webhook`\|`relay`), `url` | idempotent; registers push endpoint |
 | `message/send` | `sender`, `receiver`, `type` (`task`\|`reply`\|`broadcast`\|`ack_only`), `subject`, `body`, `ref` (reply only) | reply without `ref` → error |
 | `message/poll` | `agent`, `limit` (opt, 0=all) | **poll = claim**: marks returned letters delivered |
 | `message/peek` | `agent` | look without marking |
@@ -292,14 +326,20 @@ src/
 ├── error.rs      # BusError — errors that teach the API (transitions, param names)
 ├── message.rs    # Message, MessageStatus, MsgType (serde, snake_case wire format)
 ├── bus.rs        # EventBus — rules, roles, threading, broadcast fan-out
-├── server.rs     # axum shell: agent card, JSON-RPC, auth, rpc.discover
+├── deliver.rs    # Registry + push dispatcher (a2a/webhook/relay, RFC-002)
+├── ws.rs         # WebSocket event hub — live lifecycle feed + heartbeats
+├── openapi.rs    # utoipa OpenAPI doc (machine-readable contract)
+├── server.rs     # axum shell: agent card, JSON-RPC, auth, rpc.discover, push wiring
 ├── main.rs       # container entrypoint
 └── store/
-    ├── mod.rs    # BusStore trait — the storage abstraction
-    └── memory.rs # InMemoryStore — the default backend
+    ├── mod.rs         # BusStore trait — the storage abstraction
+    ├── memory.rs      # InMemoryStore — the default backend
+    └── sled_store.rs  # SledStore — persistent backend (HOT_POTATO_DATA_DIR)
 ```
 
-**17 tests** cover the full lifecycle, role gates, threading, idempotency, timestamp ordering, HTTP round-trips, and auth.
+**29 tests** cover the full lifecycle, role gates, threading, idempotency,
+timestamp ordering, push dispatch (including failure isolation), WebSocket fan-out,
+HTTP round-trips, persistence, and auth.
 
 See [docs/CHANGELOG.md](docs/CHANGELOG.md) for what landed, what was tried and dropped, and what's next.
 
@@ -327,6 +367,8 @@ Three things teach an agent everything: **`rpc.discover`** (the bus describes it
 - [x] v0.2 WebSocket feed `/ws`: live lifecycle events (queued/delivered/read/acked) + 60s heartbeat stats
 - [x] v0.2 OpenAPI: machine-readable contract at `/openapi.json`, Swagger UI at `/docs`
 - [x] v0.2 sled persistence (set `HOT_POTATO_DATA_DIR`; letters survive restarts)
+- [x] v0.2.1 Push wired end-to-end: `agent/register` accepts `deliver_via`, dispatch on `message/send`, push success auto-flips `queued → delivered`, production-proven against live Hermes gateways (poll-free delivery, receiver wakes and replies)
+- [ ] v0.3 RFC-003: declarative `agent/presence`, blocking `message/wait`, agent heartbeats + stale-agent detection, reconnect snapshot with per-mailbox backlog
 
 ## Contributing
 
