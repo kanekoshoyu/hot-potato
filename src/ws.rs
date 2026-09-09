@@ -95,13 +95,29 @@ async fn stream(
     let (mut sink, mut rx_client) = socket.split();
     let mut events = BroadcastStream::new(hub.tx.subscribe());
 
-    // hello frame: current bus snapshot so the client can render immediately
-    let total = bus.list_all().await.map(|m| m.len()).unwrap_or(0);
-    let acked = bus.archive().await.map(|m| m.len()).unwrap_or(0);
+    // hello frame: current bus snapshot so the client can render immediately.
+    // RFC-003 P4: per-mailbox backlog counts — a reconnecting agent sees its
+    // queue depth (and everyone else's) without a single extra RPC.
+    let all = bus.list_all().await.unwrap_or_default();
+    let total = all.len();
+    let acked = all.iter().filter(|m| m.acked_at.is_some()).count();
+    let mut backlog: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+    for m in &all {
+        let e = backlog
+            .entry(m.receiver.clone())
+            .or_insert(json!({"queued": 0, "unread": 0}));
+        if m.status == crate::message::MessageStatus::Queued {
+            e["queued"] = json!(e["queued"].as_u64().unwrap_or(0) + 1);
+        }
+        if m.status == crate::message::MessageStatus::Delivered {
+            e["unread"] = json!(e["unread"].as_u64().unwrap_or(0) + 1);
+        }
+    }
     let hello = json!({
         "event": "hello",
         "version": env!("CARGO_PKG_VERSION"),
         "stats": {"total_letters": total, "acked": acked},
+        "mailbox_backlog": backlog,
         "heartbeat_secs": 60,
     });
     if sink
@@ -136,9 +152,20 @@ async fn stream(
             }
             // heartbeat: silence is ambiguous, stats are not
             _ = heartbeat.tick() => {
-                let total = bus.list_all().await.map(|m| m.len()).unwrap_or(0);
-                let acked = bus.archive().await.map(|m| m.len()).unwrap_or(0);
-                let beat = json!({"event": "heartbeat", "stats": {"total_letters": total, "acked": acked}});
+                let all = bus.list_all().await.unwrap_or_default();
+                let total = all.len();
+                let acked = all.iter().filter(|m| m.acked_at.is_some()).count();
+                let mut backlog: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+                for m in &all {
+                    let e = backlog.entry(m.receiver.clone()).or_insert(json!({"queued": 0, "unread": 0}));
+                    if m.status == crate::message::MessageStatus::Queued {
+                        e["queued"] = json!(e["queued"].as_u64().unwrap_or(0) + 1);
+                    }
+                    if m.status == crate::message::MessageStatus::Delivered {
+                        e["unread"] = json!(e["unread"].as_u64().unwrap_or(0) + 1);
+                    }
+                }
+                let beat = json!({"event": "heartbeat", "stats": {"total_letters": total, "acked": acked}, "mailbox_backlog": backlog});
                 if sink.send(axum::extract::ws::Message::text(beat.to_string())).await.is_err() {
                     break;
                 }
