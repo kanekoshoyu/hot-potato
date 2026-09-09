@@ -99,6 +99,9 @@ pub trait PushTransport: Send + Sync {
 }
 
 /// Real HTTP transport: webhook = POST JSON; a2a/relay = POST with method shape.
+/// A2A SendMessage is a synchronous task call (waits for the peer agent to
+/// finish), so the client timeout is generous — the dispatcher runs spawned,
+/// so a slow push never blocks the original message/send.
 pub struct HttpTransport {
     client: reqwest::Client,
 }
@@ -107,7 +110,7 @@ impl HttpTransport {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("reqwest client"),
         }
