@@ -502,6 +502,14 @@ async fn health() -> impl IntoResponse {
     Json(json!({"status": "ok", "service": "hot-potato"}))
 }
 
+/// GET / — the live dashboard (static HTML, baked into the binary at compile time).
+async fn dashboard() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../dashboard/index.html"),
+    )
+}
+
 /// GET /log?limit=N — human-readable lifecycle page (RFC-001 F2).
 /// The chatlog view: every letter on the bus, newest last, one line each.
 async fn log_page(
@@ -559,8 +567,8 @@ pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
     let registry = Arc::new(crate::deliver::Registry::new());
     let card = config.agent_card();
     let app = crate::ws::router()
+        .route("/", get(dashboard).post(rpc))
         .route("/log", get(log_page))
-        .route("/", post(rpc))
         .route("/health", get(health))
         .route(
             "/.well-known/agent-card.json",
