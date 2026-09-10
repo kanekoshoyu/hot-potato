@@ -24,7 +24,7 @@ jobs:
 
   deploy:
     needs: test
-    runs-on: [self-hosted, daometric]
+    runs-on: [self-hosted, daometric-dev]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
