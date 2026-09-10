@@ -4,6 +4,8 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY dashboard ./dashboard
+COPY build.rs ./build.rs
+# date(1) for BUILD_TS in build.rs (slim image ships without util-linux date? it's coreutils—fine)
 RUN cargo build --release -p hot-potato --bin hot-potato-server
 
 # --- runtime stage ---
