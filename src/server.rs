@@ -502,6 +502,15 @@ async fn health() -> impl IntoResponse {
     Json(json!({"status": "ok", "service": "hot-potato"}))
 }
 
+/// GET /version — the running binary's cargo version (Sho: confirm which build is live).
+async fn version() -> impl IntoResponse {
+    Json(json!({
+        "service": "hot-potato",
+        "version": env!("CARGO_PKG_VERSION"),
+        "built_at": env!("BUILD_TS"),
+    }))
+}
+
 /// GET / — the live dashboard (static HTML, baked into the binary at compile time).
 async fn dashboard() -> impl IntoResponse {
     (
@@ -570,6 +579,7 @@ pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
         .route("/", get(dashboard).post(rpc))
         .route("/log", get(log_page))
         .route("/health", get(health))
+        .route("/version", get(version))
         .route(
             "/.well-known/agent-card.json",
             get(move || async move {
