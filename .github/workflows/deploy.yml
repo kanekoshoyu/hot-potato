@@ -1,0 +1,48 @@
+name: Deploy (dev box)
+
+# Sho directive (2026-09-10 night): CI green -> auto-deploy. Self-hosted runner
+# on the dev box builds the image and restarts the compose service, then verifies.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --verbose
+
+  deploy:
+    needs: test
+    runs-on: [self-hosted, daometric]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build & restart container
+        run: |
+          cd "$HOME/hot-potato"
+          git fetch origin main
+          git reset --hard origin/main
+          docker compose up -d --build
+
+      - name: Verify
+        run: |
+          sleep 3
+          version=$(curl -s -m 5 http://localhost:8080/version)
+          echo "$version"
+          echo "$version" | grep -q '"status"' || true
+          curl -sf -m 5 http://localhost:8080/health | grep -q '"ok"'
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+          echo "dashboard HTTP $code"
+          [ "$code" = "200" ] || exit 1
