@@ -573,7 +573,13 @@ pub type BusState = (
 /// Build the router (exposed for tests + compose).
 pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
     let hub = Arc::new(EventHub::new());
-    let registry = Arc::new(crate::deliver::Registry::new());
+    // Registry persistence: survive restarts. The registry file lives next to
+    // the sled data dir (HOT_POTATO_DATA_DIR) when set — no dir, no file.
+    let registry = Arc::new(match std::env::var("HOT_POTATO_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => crate::deliver::Registry::new()
+            .with_persistence(std::path::Path::new(&dir).join("registry.json")),
+        _ => crate::deliver::Registry::new(),
+    });
     let card = config.agent_card();
     let app = crate::ws::router()
         .route("/", get(dashboard).post(rpc))

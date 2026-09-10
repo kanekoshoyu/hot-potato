@@ -52,14 +52,62 @@ impl Default for DeliverVia {
 }
 
 /// The central registry: Sho's "register once, the bus finds you."
+///
+/// Persistence (v0.2.3): the registry mirrors itself into a JSON file
+/// (`registry.json` next to the sled data dir) on every write, and can be
+/// rehydrated at boot. Memory stays the source of truth at runtime; the file
+/// only exists so a container restart doesn't silently demote the whole fleet
+/// to poll-mode (bug caught by Sho's 5-second drill, 2026-09-10).
 #[derive(Default)]
 pub struct Registry {
     agents: RwLock<HashMap<String, AgentEntry>>,
+    persist_path: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a persistence file and load any registry saved there.
+    /// Call once at startup, before the HTTP server accepts traffic.
+    pub fn with_persistence(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        if let Some(entries) = Self::load_from(&path) {
+            if !entries.is_empty() {
+                // blocking context is fine: called before runtime is polled heavily
+                if let Ok(mut agents) = self.agents.try_write() {
+                    for e in entries {
+                        agents.insert(e.agent.clone(), e);
+                    }
+                    eprintln!(
+                        "🥔 registry: rehydrated {} agent(s) from {:?}",
+                        agents.len(),
+                        path
+                    );
+                }
+            }
+        }
+        self.persist_path = std::sync::Mutex::new(Some(path));
+        self
+    }
+
+    fn load_from(path: &std::path::Path) -> Option<Vec<AgentEntry>> {
+        let bytes = std::fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn persist(&self, agents: &HashMap<String, AgentEntry>) {
+        let guard = self.persist_path.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(path) = guard.as_ref() else { return };
+        let mut v: Vec<&AgentEntry> = agents.values().collect();
+        v.sort_by(|a, b| a.agent.cmp(&b.agent));
+        if let Ok(json) = serde_json::to_vec_pretty(&v) {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
     }
 
     /// Register or update. Description/deliver_via are idempotent overwrites.
@@ -76,6 +124,7 @@ impl Registry {
             deliver_via,
         };
         agents.insert(agent.to_string(), entry.clone());
+        self.persist(&agents);
         entry
     }
 
