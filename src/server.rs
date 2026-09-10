@@ -215,18 +215,28 @@ async fn rpc(
                     body.to_string(),
                 );
                 async move {
-                    bus.send(&sender, &receiver, mt, &subject, &body, r#ref)
+                    let id = bus
+                        .send(&sender, &receiver, mt, &subject, &body, r#ref)
                         .await
-                        .map(|id| {
-                            let letter = crate::message::Message::new(
+                        .map_err(|e| e.to_string())?;
+                    // Fetch the STORED letter (canonical id) — never synthesize
+                    // a fresh one, or ws/push carry a ghost id that receivers
+                    // can't read/ack against.
+                    let stored = bus.peek(&receiver).await;
+                    let letter = stored
+                        .ok()
+                        .and_then(|v| v.into_iter().find(|m| m.id == id))
+                        .unwrap_or_else(|| {
+                            crate::message::Message::new(
                                 sender.clone(),
                                 receiver.clone(),
                                 mt,
                                 subject.clone(),
                                 body.clone(),
                                 None,
-                            );
-                            hub.emit("queued", &letter);
+                            )
+                        });
+                    hub.emit("queued", &letter);
                             // Push-on-arrival (RFC-002): fire-and-forget — a push
                             // failure never blocks the send or loses the letter.
                             // On success (or a2a "notified" semantics), mark the
@@ -262,9 +272,7 @@ async fn rpc(
                                     crate::deliver::PushOutcome::Skipped { .. } => {}
                                 }
                             });
-                            json!({"id": id})
-                        })
-                        .map_err(|e| e.to_string())
+                            Ok(json!({"id": id}))
                 }
             })
             .await
