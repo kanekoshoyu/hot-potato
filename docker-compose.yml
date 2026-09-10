@@ -15,6 +15,7 @@ services:
       RUST_LOG: info
     volumes:
       - hot-potato-data:/data
+      - ./dashboard:/srv/dashboard:ro   # static dashboard UI
     restart: unless-stopped
 
 volumes:

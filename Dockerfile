@@ -3,6 +3,7 @@ FROM rust:1.97-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY dashboard ./dashboard
 RUN cargo build --release -p hot-potato --bin hot-potato-server
 
 # --- runtime stage ---

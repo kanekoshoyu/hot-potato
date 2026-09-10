@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hot Potato 🥔 — Live Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922;
+    --blue: #58a6ff; --cyan: #39c5cf; --red: #f85149; --mono: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header h1 span { opacity: .8; }
+  .conn { font-family: var(--mono); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; }
+  .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 24px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); padding: 10px 14px; border-bottom: 1px solid var(--border); display:flex; justify-content: space-between;}
+  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 16px 24px 0; max-width: 1500px; margin: 0 auto; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+  .stat .num { font-family: var(--mono); font-size: 26px; font-weight: 700; }
+  .stat .lbl { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+  /* agent list */
+  .agent { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid #21262d; cursor: default; }
+  .agent:last-child { border-bottom: none; }
+  .agent .avatar { width: 30px; height: 30px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; font-family: var(--mono); }
+  .agent .nm { font-weight: 600; font-size: 14px; }
+  .agent .sub { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+  .badge { margin-left: auto; font-size: 10px; font-family: var(--mono); padding: 2px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--dim); }
+  /* feed */
+  .feed { max-height: 420px; overflow-y: auto; }
+  .evt { display: flex; gap: 10px; padding: 8px 14px; border-bottom: 1px solid #21262d; font-family: var(--mono); font-size: 12px; align-items: baseline; }
+  .evt .t { color: var(--dim); flex-shrink: 0; }
+  .evt .id { color: var(--cyan); cursor: pointer; }
+  .evt .arrow { color: var(--dim); }
+  .evt .subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .pill { font-size: 10px; padding: 1px 7px; border-radius: 9px; font-family: var(--mono); flex-shrink: 0; }
+  .pill.queued { background: #33290033; color: var(--yellow); border: 1px solid var(--yellow); }
+  .pill.delivered { background: #58a6ff22; color: var(--blue); border: 1px solid var(--blue); }
+  .pill.read { background: #39c5cf22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .pill.acked { background: #3fb95022; color: var(--green); border: 1px solid var(--green); }
+  /* graph */
+  .graph-wrap { position: relative; height: 460px; }
+  svg { width: 100%; height: 100%; }
+  .edge { stroke: #30363d; stroke-width: 1.5; }
+  .edge.active { stroke: var(--yellow); stroke-width: 2.5; }
+  .node circle { fill: var(--panel); stroke: var(--blue); stroke-width: 2; cursor: pointer; transition: r .2s; }
+  .node.hot circle { stroke: var(--yellow); filter: drop-shadow(0 0 6px var(--yellow)); }
+  .node text { fill: var(--text); font-size: 12px; font-family: var(--mono); text-anchor: middle; }
+  .node .cnt { fill: var(--dim); font-size: 10px; }
+  /* letter inspector */
+  .inspector { font-family: var(--mono); font-size: 12px; padding: 12px 14px; white-space: pre-wrap; word-break: break-all; color: var(--dim); max-height: 300px; overflow-y: auto; }
+  .inspector b { color: var(--text); }
+  footer { text-align: center; padding: 18px; color: var(--dim); font-size: 11px; font-family: var(--mono); }
+  footer a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥔 Hot Potato <span>— EventMessageBus · live dashboard</span></h1>
+  <div class="conn"><span class="dot" id="dot"></span><span id="connTxt">connecting…</span></div>
+</header>
+
+<div class="stats-row">
+  <div class="stat"><div class="num" id="stAgents">–</div><div class="lbl">Agents connected</div></div>
+  <div class="stat"><div class="num" id="stLetters">–</div><div class="lbl">Total letters</div></div>
+  <div class="stat"><div class="num" id="stInflight">–</div><div class="lbl">In flight (not acked)</div></div>
+  <div class="stat"><div class="num" id="stToday">–</div><div class="lbl">Events today</div></div>
+</div>
+
+<main>
+  <div style="display:flex; flex-direction:column; gap:16px;">
+    <div class="panel">
+      <h2>Agents <span id="agentCount"></span></h2>
+      <div id="agentList"><div class="agent"><span class="sub">loading…</span></div></div>
+    </div>
+    <div class="panel">
+      <h2>Letter inspector <span id="inspId"></span></h2>
+      <div class="inspector" id="inspector">Click any letter id in the feed to inspect its full lifecycle.</div>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:16px;">
+    <div class="panel">
+      <h2>Agent graph <span style="text-transform:none">— who passes to whom</span></h2>
+      <div class="graph-wrap"><svg id="graph"></svg></div>
+    </div>
+    <div class="panel">
+      <h2>Live feed <span id="feedCount"></span></h2>
+      <div class="feed" id="feed"><div class="evt"><span class="t">--:--:--</span><span class="subj">connecting to /ws …</span></div></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  Hot Potato — a mailbox with a state machine ·
+  <a href="/openapi.json">openapi</a> · <a href="/log">chatlog</a> · <a href="/health">health</a> ·
+  built by <a href="https://github.com/kanekoshoyu/hot-potato">Daometric Agents</a>
+</footer>
+
+<script>
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+const RPC = location.origin + '/';
+const STATUS_ORDER = { queued: 0, delivered: 1, read: 2, acked: 3 };
+const AGENT_COLORS = ['#58a6ff','#3fb950','#d29922','#39c5cf','#bc8cff','#f85149','#ff7b72','#7ee787'];
+
+let letters = {};      // id -> letter
+let agents = new Set();
+let feedCount = 0;
+let ws = null;
+
+const $ = id => document.getElementById(id);
+
+function now() { return new Date().toTimeString().slice(0, 8); }
+function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+
+function upsertLetter(l) {
+  if (!l || !l.id) return;
+  const prev = letters[l.id];
+  letters[l.id] = Object.assign(prev || {}, l);
+  agents.add(l.sender); agents.add(l.receiver);
+}
+
+function bumpStat(id) { const el = $(id); el.textContent = (parseInt(el.textContent)||0) + 1; }
+
+function refreshStats() {
+  const all = Object.values(letters);
+  $('stAgents').textContent = agents.size;
+  $('stLetters').textContent = all.length;
+  $('stInflight').textContent = all.filter(l => l.status !== 'acked').length;
+  $('agentCount').textContent = agents.size ? `(${agents.size})` : '';
+}
+
+function renderAgents() {
+  const box = $('agentList');
+  const names = [...agents].sort();
+  box.innerHTML = names.map((n, i) => {
+    const inbox = Object.values(letters).filter(l => l.receiver === n).length;
+    const out = Object.values(letters).filter(l => l.sender === n).length;
+    const c = AGENT_COLORS[i % AGENT_COLORS.length];
+    return `<div class="agent">
+      <div class="avatar" style="background:${c}22;color:${c};border:1px solid ${c}55">${esc(n.slice(0,2).toUpperCase())}</div>
+      <div><div class="nm">${esc(n)}</div><div class="sub">↓${inbox} in · ↑${out} out</div></div>
+      <span class="badge">a2a</span>
+    </div>`;
+  }).join('') || '<div class="agent"><span class="sub">no letters yet</span></div>';
+}
+
+function feedLine(evt, l) {
+  const feed = $('feed');
+  if (feedCount === 0) feed.innerHTML = '';
+  feedCount++;
+  $('feedCount').textContent = `(${feedCount})`;
+  const el = document.createElement('div');
+  el.className = 'evt';
+  el.innerHTML = `<span class="t">${now()}</span>
+    <span class="id" title="${esc(l.id)}" onclick="inspect('${esc(l.id)}')">${esc(l.id.slice(0,8))}</span>
+    <span>${esc(l.sender)}</span><span class="arrow">→</span><span>${esc(l.receiver)}</span>
+    <span class="subj">${esc(l.subject || '')}</span>
+    <span class="pill ${evt}">${evt}</span>`;
+  feed.prepend(el);
+  while (feed.children.length > 300) feed.lastChild.remove();
+}
+
+window.inspect = function(id) {
+  const l = letters[id];
+  if (!l) return;
+  $('inspId').textContent = id.slice(0, 8);
+  $('inspector').innerHTML =
+    `<b>id</b>      ${esc(l.id)}\n` +
+    `<b>from</b>    ${esc(l.sender)}  →  <b>to</b>  ${esc(l.receiver)}\n` +
+    `<b>type</b>    ${esc(l.msg_type || l.type || 'task')}   <b>status</b>  ${esc(l.status)}\n` +
+    `<b>subject</b> ${esc(l.subject || '')}\n` +
+    (l.body ? `<b>body</b>    ${esc(l.body).slice(0, 400)}\n` : '') +
+    `<b>created</b>   ${esc((l.created_at||'').slice(0,19))}\n` +
+    (l.delivered_at ? `<b>delivered</b>  ${esc(l.delivered_at.slice(0,19))}\n` : '') +
+    (l.read_at ? `<b>read</b>      ${esc(l.read_at.slice(0,19))}\n` : '') +
+    (l.acked_at ? `<b>acked</b>     ${esc(l.acked_at.slice(0,19))}${l.ack_note ? ' — ' + esc(l.ack_note) : ''}\n` : '');
+};
+
+/* ---------- graph ---------- */
+let edges = {};  // "s|r" -> count
+let hotEdge = null, hotUntil = 0;
+
+function addEdge(s, r) {
+  if (s === r) return null;
+  const k = s + '|' + r;
+  edges[k] = (edges[k] || 0) + 1;
+  hotEdge = k; hotUntil = Date.now() + 4000;
+  return k;
+}
+
+function renderGraph() {
+  const svg = $('graph');
+  const W = svg.clientWidth || 700, H = svg.clientHeight || 460;
+  const names = [...agents].sort();
+  if (names.length === 0) { svg.innerHTML = `<text x="50%" y="50%" fill="#8b949e" text-anchor="middle">waiting for letters…</text>`; return; }
+  const cx = W/2, cy = H/2, R = Math.min(W, H)/2 - 60;
+  const pos = {};
+  names.forEach((n, i) => {
+    const a = (i / names.length) * Math.PI * 2 - Math.PI/2;
+    pos[n] = [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+  });
+  let svgStr = '';
+  for (const [k, cnt] of Object.entries(edges)) {
+    const [s, r] = k.split('|');
+    if (!pos[s] || !pos[r]) continue;
+    const hot = k === hotEdge && Date.now() < hotUntil;
+    const [x1, y1] = pos[s], [x2, y2] = pos[r];
+    const mx = (x1+x2)/2 + (y2-y1)*0.08, my = (y1+y2)/2 + (x1-x2)*0.08;
+    svgStr += `<path class="edge ${hot ? 'active' : ''}" d="M${x1},${y1} Q${mx},${my} ${x2},${y2}" fill="none" marker-end="url(#arr)"/>`;
+    if (cnt > 1) svgStr += `<text x="${mx}" y="${my-4}" fill="#8b949e" font-size="10" text-anchor="middle" font-family="monospace">${cnt}</text>`;
+  }
+  names.forEach((n, i) => {
+    const [x, y] = pos[n];
+    const c = AGENT_COLORS[i % AGENT_COLORS.length];
+    const inbox = Object.values(letters).filter(l => l.receiver === n && l.status !== 'acked').length;
+    svgStr += `<g class="node ${inbox > 0 ? 'hot' : ''}">
+      <circle cx="${x}" cy="${y}" r="${26 + Math.min(inbox, 5)}" stroke="${c}"/>
+      <text x="${x}" y="${y + 4}">${esc(n.slice(0, 9))}</text>
+      <text class="cnt" x="${x}" y="${y + 42}">${inbox > 0 ? inbox + ' in flight' : 'idle'}</text>
+    </g>`;
+  });
+  svg.innerHTML = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff88"/></marker></defs>` + svgStr;
+}
+
+/* ---------- data boot ---------- */
+async function loadSnapshot() {
+  try {
+    const r = await fetch(RPC, { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/list', params:{}}) });
+    const d = await r.json();
+    (d.result || []).forEach(l => { upsertLetter(l); });
+    // rebuild feed quietly (latest 40)
+    const feed = $('feed'); feed.innerHTML = ''; feedCount = 0;
+    Object.values(letters).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')).slice(0, 40)
+      .forEach(l => feedLine(l.status, l));
+    refreshStats(); renderAgents(); renderGraph();
+  } catch (e) { console.warn('snapshot failed', e); }
+}
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { $('dot').classList.add('live'); $('connTxt').textContent = 'live · ws connected'; };
+  ws.onmessage = ev => {
+    let d; try { d = JSON.parse(ev.data); } catch { return; }
+    if (d.event === 'hello') {
+      if (d.stats) { $('stLetters').textContent = d.stats.total_letters ?? '–'; }
+      loadSnapshot(); return;
+    }
+    if (d.event === 'heartbeat') { $('connTxt').textContent = 'live · hb ' + now(); return; }
+    const l = d.message || d;
+    if (!l.id) return;
+    const prev = letters[l.id];
+    upsertLetter(Object.assign({}, l, { status: d.event === 'queued' ? 'queued' : (l.status || d.event) }));
+    if (d.event === 'queued') { addEdge(l.sender, l.receiver); }
+    feedLine(d.event, letters[l.id]);
+    refreshStats(); renderAgents(); renderGraph();
+  };
+  ws.onclose = () => {
+    $('dot').classList.remove('live'); $('connTxt').textContent = 'reconnecting…';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+setInterval(() => { if (Date.now() > hotUntil) renderGraph(); }, 2000); // cool hot edges
+window.addEventListener('resize', renderGraph);
+loadSnapshot().then(connect);
+</script>
+</body>
+</html>
