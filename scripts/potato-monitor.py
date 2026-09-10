@@ -80,7 +80,17 @@ def initials(n):
 
 
 def fmt(m):
-    return f"[{initials(m['sender'])}->{initials(m['receiver'])}] {m['subject'][:50]}"
+    """Three-line layout per Sho:
+    line1 = pointer + direction, line2 = topic, line3 = snippet + status."""
+    subj = m.get("subject", "?")
+    # strip leading direction-tag duplication like "[P->A]" inside the subject
+    import re as _re
+    subj = _re.sub(r"^\s*(🥔\s*)?\[[A-Za-z]->[A-Za-z]\]\s*", "", subj)
+    snippet = m.get("snippet") or ""
+    line1 = f"{m['_id8']} {initials(m['sender'])}→{initials(m['receiver'])}"
+    line2 = subj[:72]
+    line3 = (snippet[:90] + " …") if len(snippet) > 90 else snippet
+    return f"{line1}\n{line2}" + (f"\n{line3}" if line3 else "")
 
 
 def bus(payload):
@@ -112,9 +122,11 @@ def on_event(ev):
         potatoes[mid] = {"sender": ev.get("sender", "?"),
                          "receiver": ev.get("receiver", "?"),
                          "subject": ev.get("subject", "?"),
+                         "snippet": ev.get("body", "") or ev.get("snippet", ""),
+                         "_id8": mid[:8],
                          "status": ev_type}
         if ev_type == "queued":
-            tg(f"🥔 NEW {mid[:8]} {fmt(potatoes[mid])} — queued")
+            tg(f"🥔 NEW\n{fmt(potatoes[mid])}\n— queued")
         log(f"{mid[:8]} new letter ({ev_type})")
         save_state()
         return
@@ -124,8 +136,10 @@ def on_event(ev):
         return  # duplicate event
     potatoes[mid]["status"] = ev_type
     log(f"{mid[:8]} {prev} -> {ev_type}")
-    if ev_type in ("delivered", "read", "acked"):
-        tg(f"🥔 {mid[:8]} {fmt(potatoes[mid])} — {ev_type.upper()}")
+    # Noise reduction per Sho: read/ack always arrive together in practice.
+    # Only report the terminal state (acked); skip delivered + read entirely.
+    if ev_type == "acked":
+        tg(f"🥔 OK\n{fmt(potatoes[mid])}\n— acked ✓")
     maybe_alarm_stuck(mid)
     save_state()
 
@@ -142,12 +156,12 @@ def maybe_alarm_stuck(mid):
         return
     age = age_min(created)
     if m["status"] == "queued" and age > QUEUED_ALARM_MIN:
-        tg(f"⚠️ 🥔 {mid[:8]} {fmt(m)} — queued {age:.0f}min, "
+        tg(f"⚠️ STUCK\n{fmt(m)}\n— queued {age:.0f}min, "
            f"{initials(m['receiver'])} hasn't picked it up.")
         alarmed.add((mid, m["status"]))
         save_state()
     elif m["status"] == "delivered" and age > DELIVERED_ALARM_MIN:
-        tg(f"⚠️ 🥔 {mid[:8]} {fmt(m)} — delivered {age:.0f}min, no ack. "
+        tg(f"⚠️ STUCK\n{fmt(m)}\n— delivered {age:.0f}min, no ack. "
            f"{initials(m['receiver'])} still holding it.")
         alarmed.add((mid, m["status"]))
         save_state()
