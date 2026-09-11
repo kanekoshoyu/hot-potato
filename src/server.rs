@@ -43,6 +43,10 @@ pub struct ServerConfig {
     pub public_url: String,
     pub version: String,
     pub bearer_token: Option<String>,
+    /// RFC-004: federation peers (remote pools + the agents they are home to).
+    pub peers: crate::federation::Peers,
+    /// RFC-004: this pool's own name (goes into `forwarded_from`).
+    pub pool_name: String,
 }
 
 impl ServerConfig {
@@ -56,6 +60,8 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "http://localhost:8080".into()),
             version: env!("CARGO_PKG_VERSION").to_string(),
             bearer_token: std::env::var("HOT_POTATO_TOKEN").ok(),
+            peers: crate::federation::Peers::from_env(),
+            pool_name: std::env::var("HOT_POTATO_POOL").unwrap_or_else(|_| "local".into()),
         }
     }
 
@@ -208,21 +214,156 @@ async fn rpc(
                     .get("ref")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                // RFC-004 envelope: letters that crossed an inter-bus link.
+                let hops = req.params.get("hops").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                let forwarded_from = req
+                    .params
+                    .get("forwarded_from")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let (sender, receiver, subject, body) = (
                     sender.to_string(),
                     receiver.to_string(),
                     subject.to_string(),
                     body.to_string(),
                 );
+
+                // --- RFC-004: cross-pool routing -------------------------------
+                // 1) Inbound federated letter: the peer's bus dialed us with the
+                //    peer token + X-Potato-Pool header. Auto-register the remote
+                //    sender (Worker) so the bus's normal rules accept the letter.
+                // 2) Outbound: if the receiver's home pool is a configured peer,
+                //    hand the letter over HTTP to that peer's bus instead of
+                //    queueing locally. Local copy goes to `forwarded` state.
+                let fed_headers = headers
+                    .get("x-potato-pool")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let authed = config
+                    .bearer_token
+                    .as_ref()
+                    .map(|t| {
+                        headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|v| v == format!("Bearer {t}"))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let peers = config.peers.clone();
+                let pool_name = config.pool_name.clone();
+                let bus3 = bus.clone();
+                let registry3 = registry.clone();
+                let hub3 = hub.clone();
                 async move {
-                    let id = bus
+                    // (1) inbound from a federated peer bus?
+                    if let Some(from_pool) = fed_headers {
+                        if !authed {
+                            return Err("federated send requires the pool bearer token".into());
+                        }
+                        if hops == 0 || forwarded_from.is_none() {
+                            return Err(
+                                "federated send must carry hops and forwarded_from".into()
+                            );
+                        }
+                        if hops > crate::federation::MAX_HOPS {
+                            return Err(format!(
+                                "hop limit {} exceeded (from pool `{from_pool}`)",
+                                crate::federation::MAX_HOPS
+                            ));
+                        }
+                        // Federated senders are auto-registered: the peer bus
+                        // authenticated with the shared token, that's the trust.
+                        if !bus3.is_registered(&sender).await {
+                            registry3
+                                .register(&sender, &format!("federated from {from_pool}"),
+                                          crate::deliver::DeliverVia::Poll)
+                                .await;
+                            bus3.register(&sender, crate::bus::Role::Worker)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
+                        let id = bus3
+                            .send_envelope(
+                                &sender, &receiver, mt, &subject, &body, r#ref,
+                                hops, forwarded_from,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let stored = bus3.peek(&receiver).await;
+                        if let Ok(letters) = stored {
+                            if let Some(letter) = letters.into_iter().find(|m| m.id == id) {
+                                hub3.emit("queued", &letter);
+                            }
+                        }
+                        return Ok(json!({"id": id, "forwarded": true, "to_pool": from_pool}));
+                    }
+
+                    // (2) outbound to a federated peer?
+                    if !peers.is_empty() {
+                        if let Some(peer) = peers.resolve(&receiver) {
+                            // The receiver lives on the peer pool: shadow-register
+                            // them locally so bus rules accept the letter (same
+                            // pattern as the inbound auto-registration).
+                            if !bus3.is_registered(&receiver).await {
+                                registry3
+                                    .register(
+                                        &receiver,
+                                        &format!("federated at {}", peer.name()),
+                                        crate::deliver::DeliverVia::Poll,
+                                    )
+                                    .await;
+                                bus3.register(&receiver, crate::bus::Role::Worker)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            let id = bus3
+                                .send_envelope(
+                                    &sender, &receiver, mt, &subject, &body, r#ref.clone(),
+                                    0, Some(pool_name.clone()),
+                                )
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            // Fetch the stored letter, mark it forwarded on
+                            // successful handover; on failure it stays queued.
+                            let stored = bus3.peek(&receiver).await;
+                            let letter = stored.ok().and_then(|v| {
+                                v.into_iter().find(|m| m.id == id)
+                            });
+                            match crate::federation::forward(&peer, &letter.clone().expect(
+                                "letter just stored", ), &pool_name).await {
+                                Ok(()) => {
+                                    if let Ok(m) = bus3
+                                        .mark_delivered(&receiver, &id)
+                                        .await
+                                    {
+                                        hub3.emit("delivered", &m);
+                                    }
+                                    return Ok(json!({
+                                        "id": id,
+                                        "forwarded": true,
+                                        "to_pool": peer.name()
+                                    }));
+                                }
+                                Err(e) => {
+                                    return Err(format!(
+                                        "forward to pool `{}` failed: {e} (letter stays queued)",
+                                        peer.name()
+                                    ))
+                                }
+                            }
+                        }
+                    }
+
+                    // (3) local delivery (unchanged v0.2 path)
+                    let id = bus3
                         .send(&sender, &receiver, mt, &subject, &body, r#ref)
                         .await
                         .map_err(|e| e.to_string())?;
                     // Fetch the STORED letter (canonical id) — never synthesize
                     // a fresh one, or ws/push carry a ghost id that receivers
                     // can't read/ack against.
-                    let stored = bus.peek(&receiver).await;
+                    let stored = bus3.peek(&receiver).await;
                     let letter = stored
                         .ok()
                         .and_then(|v| v.into_iter().find(|m| m.id == id))
@@ -236,43 +377,43 @@ async fn rpc(
                                 None,
                             )
                         });
-                    hub.emit("queued", &letter);
-                            // Push-on-arrival (RFC-002): fire-and-forget — a push
-                            // failure never blocks the send or loses the letter.
-                            // On success (or a2a "notified" semantics), mark the
-                            // letter delivered: it left the shelf without a poll.
-                            let registry = registry.clone();
-                            let bus2 = bus.clone();
-                            let transport: Arc<dyn crate::deliver::PushTransport> =
-                                Arc::new(crate::deliver::HttpTransport::new());
-                            let push_letter = serde_json::to_value(&letter).expect("letter json");
-                            let push_receiver = receiver.clone();
-                            let push_id = id.clone();
-                            tokio::spawn(async move {
-                                let outcome = crate::deliver::dispatch_push(
-                                    &registry,
-                                    &transport,
-                                    &push_receiver,
-                                    &push_letter,
-                                )
-                                .await;
-                                match outcome {
-                                    crate::deliver::PushOutcome::Pushed => {
-                                        if let Ok(m) =
-                                            bus2.mark_delivered(&push_receiver, &push_id).await
-                                        {
-                                            hub.emit("delivered", &m);
-                                        }
-                                    }
-                                    crate::deliver::PushOutcome::Failed { error } => {
-                                        eprintln!(
-                                            "🥔 push failed for {push_receiver}: {error}"
-                                        );
-                                    }
-                                    crate::deliver::PushOutcome::Skipped { .. } => {}
+                    hub3.emit("queued", &letter);
+                    // Push-on-arrival (RFC-002): fire-and-forget — a push
+                    // failure never blocks the send or loses the letter.
+                    // On success (or a2a "notified" semantics), mark the
+                    // letter delivered: it left the shelf without a poll.
+                    let registry = registry3.clone();
+                    let bus2 = bus3.clone();
+                    let transport: Arc<dyn crate::deliver::PushTransport> =
+                        Arc::new(crate::deliver::HttpTransport::new());
+                    let push_letter = serde_json::to_value(&letter).expect("letter json");
+                    let push_receiver = receiver.clone();
+                    let push_id = id.clone();
+                    tokio::spawn(async move {
+                        let outcome = crate::deliver::dispatch_push(
+                            &registry,
+                            &transport,
+                            &push_receiver,
+                            &push_letter,
+                        )
+                        .await;
+                        match outcome {
+                            crate::deliver::PushOutcome::Pushed => {
+                                if let Ok(m) =
+                                    bus2.mark_delivered(&push_receiver, &push_id).await
+                                {
+                                    hub.emit("delivered", &m);
                                 }
-                            });
-                            Ok(json!({"id": id}))
+                            }
+                            crate::deliver::PushOutcome::Failed { error } => {
+                                eprintln!(
+                                    "🥔 push failed for {push_receiver}: {error}"
+                                );
+                            }
+                            crate::deliver::PushOutcome::Skipped { .. } => {}
+                        }
+                    });
+                    Ok(json!({"id": id}))
                 }
             })
             .await
@@ -621,6 +762,7 @@ mod tests {
         let bus = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
         bus.register("patricia", Role::Pm).await.unwrap();
         bus.register("diana", Role::Worker).await.unwrap();
+        bus.register("victoria", Role::Worker).await.unwrap();
         bus
     }
 
@@ -631,6 +773,8 @@ mod tests {
             public_url: "http://test".into(),
             version: "0.1.0".into(),
             bearer_token: None,
+            peers: crate::federation::Peers::default(),
+            pool_name: "test".into(),
         });
         router(bus, cfg)
     }
@@ -825,6 +969,8 @@ mod tests {
             public_url: "u".into(),
             version: "0".into(),
             bearer_token: Some("secret".into()),
+            peers: crate::federation::Peers::default(),
+            pool_name: "t".into(),
         });
         let a = router(bus, cfg);
         let body = json!({"jsonrpc":"2.0","id":1,"method":"bus/archive","params":{}});
@@ -839,5 +985,258 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- RFC-004: bus federation -------------------------------------------
+
+    /// A bus app that routes `diana` to a fake peer at 127.0.0.1:1
+    /// (connection refused — deterministic "peer down").
+    fn fed_app_down_peer(bus: Arc<EventBus>) -> Router {
+        let peers = crate::federation::Peers::from_json(
+            r#"[{"name":"fleet","url":"http://127.0.0.1:1","token":"x",
+                 "agents":["diana"]}]"#,
+        )
+        .unwrap();
+        let cfg = Arc::new(ServerConfig {
+            name: "t".into(),
+            description: "d".into(),
+            public_url: "u".into(),
+            version: "0".into(),
+            bearer_token: None,
+            peers,
+            pool_name: "sho".into(),
+        });
+        router(bus, cfg)
+    }
+
+    #[tokio::test]
+    async fn federation_peer_down_letter_stays_queued() {
+        let bus = test_bus().await;
+        let res = rpc_call(
+            fed_app_down_peer(bus.clone()),
+            "message/send",
+            json!({"sender":"patricia","receiver":"diana","type":"task",
+                   "subject":"cross pool","body":"b"}),
+        )
+        .await;
+        // send returns a JSON-RPC error (forward failed), letter stays queued
+        assert!(res.get("error").is_some(), "expected forward failure: {res}");
+        assert!(res["error"]["message"].as_str().unwrap().contains("stays queued"));
+    }
+
+    #[tokio::test]
+    async fn federation_local_delivery_untouched_when_no_peer_matches() {
+        // peers configured, but receiver is local → normal path
+        let bus = test_bus().await;
+        let res = rpc_call(
+            fed_app_down_peer(bus.clone()),
+            "message/send",
+            json!({"sender":"patricia","receiver":"victoria","type":"task",
+                   "subject":"local one","body":"b"}),
+        )
+        .await;
+        assert!(res.get("result").is_some(), "local send failed: {res}");
+        assert!(res["result"]["forwarded"].is_null());
+        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"victoria"})).await;
+        assert_eq!(peek["result"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn federation_inbound_requires_token_and_envelope() {
+        let bus = test_bus().await;
+        let peers = crate::federation::Peers::default();
+        let cfg = Arc::new(ServerConfig {
+            name: "t".into(),
+            description: "d".into(),
+            public_url: "u".into(),
+            version: "0".into(),
+            bearer_token: Some("poolsecret".into()),
+            peers,
+            pool_name: "sho".into(),
+        });
+        let a = router(bus.clone(), cfg);
+
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"message/send",
+            "params":{"sender":"patricia","receiver":"victoria","type":"task",
+                      "subject":"x","body":"b"}});
+        // federated header WITHOUT token → rejected
+        let res = a
+            .clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .header("x-potato-pool", "fleet")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // token but no hops/forwarded_from → error
+        let res = a
+            .clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer poolsecret")
+                    .header("x-potato-pool", "fleet")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["error"]["message"].as_str().unwrap().contains("hops"));
+
+        // full envelope → accepted, remote sender auto-registered
+        let body = json!({"jsonrpc":"2.0","id":2,"method":"message/send",
+            "params":{"sender":"patricia","receiver":"victoria","type":"task",
+                      "subject":"cross-pool hi","body":"b",
+                      "hops":1,"forwarded_from":"fleet"}});
+        let res = a
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer poolsecret")
+                    .header("x-potato-pool", "fleet")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["result"]["forwarded"], true);
+
+        // the letter landed in victoria's mailbox with the envelope intact
+        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"victoria"})).await;
+        let arr = peek["result"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["sender"], "patricia");
+        assert_eq!(arr[0]["forwarded_from"], "fleet");
+        assert_eq!(arr[0]["hops"], 1);
+    }
+
+    #[tokio::test]
+    async fn federation_inbound_hops_over_limit_rejected() {
+        let bus = test_bus().await;
+        let cfg = Arc::new(ServerConfig {
+            name: "t".into(),
+            description: "d".into(),
+            public_url: "u".into(),
+            version: "0".into(),
+            bearer_token: Some("poolsecret".into()),
+            peers: crate::federation::Peers::default(),
+            pool_name: "sho".into(),
+        });
+        let a = router(bus, cfg);
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"message/send",
+            "params":{"sender":"patricia","receiver":"victoria","type":"task",
+                      "subject":"loop","body":"b","hops":9,"forwarded_from":"fleet"}});
+        let res = a
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer poolsecret")
+                    .header("x-potato-pool", "fleet")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["error"]["message"].as_str().unwrap().contains("hop limit"));
+    }
+
+    #[tokio::test]
+    async fn federation_end_to_end_two_real_buses() {
+        // The real thing: two in-process buses wired to each other over HTTP.
+        // Pool A (sho): patricia local, diana routed to pool B.
+        // Pool B (fleet): diana local, receives over HTTP from pool A.
+        use tokio::net::TcpListener;
+
+        let bus_a = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
+        bus_a.register("patricia", Role::Pm).await.unwrap();
+        let l_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = l_a.local_addr().unwrap();
+
+        let bus_b = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
+        bus_b.register("diana", Role::Worker).await.unwrap();
+        let l_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = l_b.local_addr().unwrap();
+        let cfg_b = Arc::new(ServerConfig {
+            name: "poolB".into(),
+            description: "d".into(),
+            public_url: format!("http://{addr_b}"),
+            version: "0".into(),
+            bearer_token: Some("shared-secret".into()),
+            peers: crate::federation::Peers::default(),
+            pool_name: "fleet".into(),
+        });
+
+        // Point A's routing at B (real addr), then serve both.
+        let peers_a = crate::federation::Peers::from_json(&format!(
+            r#"[{{"name":"fleet","url":"http://{addr_b}","token":"shared-secret",
+                 "agents":["diana"]}}]"#
+        ))
+        .unwrap();
+
+        let cfg_a = Arc::new(ServerConfig {
+            name: "poolA".into(),
+            description: "d".into(),
+            public_url: format!("http://{addr_a}"),
+            version: "0".into(),
+            bearer_token: Some("shared-secret".into()),
+            peers: peers_a,
+            pool_name: "sho".into(),
+        });
+
+        tokio::spawn(async move {
+            axum::serve(l_a, router(bus_a, cfg_a)).await.unwrap();
+        });
+        let bus_b2 = bus_b.clone();
+        tokio::spawn(async move {
+            axum::serve(l_b, router(bus_b2, cfg_b)).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // anastasia-side agent (a client of pool A) sends to diana (pool B)
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr_a}"))
+            .bearer_auth("shared-secret")
+            .json(&json!({
+                "jsonrpc":"2.0","id":1,"method":"message/send",
+                "params":{"sender":"patricia","receiver":"diana","type":"task",
+                          "subject":"fed e2e","body":"across pools!"}
+            }))
+            .send()
+            .await
+            .unwrap();
+        let v: Value = resp.json().await.unwrap();
+        assert!(v.get("error").is_none(), "forward failed: {v}");
+        assert_eq!(v["result"]["forwarded"], true);
+        assert_eq!(v["result"]["to_pool"], "fleet");
+
+        // diana polls her LOCAL bus on pool B and finds the letter
+        let resp = client
+            .post(format!("http://{addr_b}"))
+            .bearer_auth("shared-secret")
+            .json(&json!({"jsonrpc":"2.0","id":2,"method":"message/poll",
+                          "params":{"agent":"diana"}}))
+            .send()
+            .await
+            .unwrap();
+        let v: Value = resp.json().await.unwrap();
+        let letters = v["result"].as_array().unwrap();
+        assert_eq!(letters.len(), 1);
+        assert_eq!(letters[0]["sender"], "patricia");
+        assert_eq!(letters[0]["subject"], "fed e2e");
+        assert_eq!(letters[0]["forwarded_from"], "sho");
+        assert_eq!(letters[0]["hops"], 1);
     }
 }
