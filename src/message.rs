@@ -58,6 +58,12 @@ pub struct Message {
     /// <= 80 chars completion summary written on ack.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ack_note: Option<String>,
+    /// Federation (RFC-004): how many inter-bus links this letter has crossed.
+    #[serde(default)]
+    pub hops: u8,
+    /// Federation (RFC-004): pool that handed this letter over, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarded_from: Option<String>,
 }
 
 impl Message {
@@ -84,6 +90,8 @@ impl Message {
             read_at: None,
             acked_at: None,
             ack_note: None,
+            hops: 0,
+            forwarded_from: None,
         }
     }
 }

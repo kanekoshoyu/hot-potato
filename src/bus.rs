@@ -52,6 +52,24 @@ impl EventBus {
         body: &str,
         r#ref: Option<String>,
     ) -> BusResult<String> {
+        self.send_envelope(sender, receiver, msg_type, subject, body, r#ref, 0, None)
+            .await
+    }
+
+    /// Like [`send`] but with the federation envelope (RFC-004): letters that
+    /// arrived over an inter-bus link carry their hop count and origin pool so
+    /// loops are detectable and the path is auditable.
+    pub async fn send_envelope(
+        &self,
+        sender: &str,
+        receiver: &str,
+        msg_type: MsgType,
+        subject: &str,
+        body: &str,
+        r#ref: Option<String>,
+        hops: u8,
+        forwarded_from: Option<String>,
+    ) -> BusResult<String> {
         self.ensure_registered(sender).await?;
 
         if msg_type == MsgType::Broadcast {
@@ -73,7 +91,9 @@ impl EventBus {
             self.ensure_registered(receiver).await?;
         }
 
-        let msg = Message::new(sender, receiver, msg_type, subject, body, r#ref);
+        let mut msg = Message::new(sender, receiver, msg_type, subject, body, r#ref);
+        msg.hops = hops;
+        msg.forwarded_from = forwarded_from;
         self.store.push(&msg).await?;
         Ok(msg.id)
     }
@@ -155,6 +175,12 @@ impl EventBus {
         } else {
             Err(BusError::UnknownAgent(agent.to_string()))
         }
+    }
+
+    /// RFC-004: registration check without the error path — the federation
+    /// inbound route uses this to auto-register remote senders exactly once.
+    pub async fn is_registered(&self, agent: &str) -> bool {
+        self.roles.read().await.contains_key(agent)
     }
 
     async fn role_of(&self, agent: &str) -> Option<Role> {
