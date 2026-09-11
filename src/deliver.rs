@@ -43,6 +43,11 @@ pub struct AgentEntry {
     pub description: String,
     #[serde(default)]
     pub deliver_via: DeliverVia,
+    /// RFC-005: free-form team/pool tags (e.g. "sho-pool", "fleet",
+    /// "trading-desk"). The dashboard colors agents by tag; registration
+    /// auto-tags federated agents with their home pool name.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl Default for DeliverVia {
@@ -110,18 +115,40 @@ impl Registry {
         }
     }
 
-    /// Register or update. Description/deliver_via are idempotent overwrites.
+    /// Register or update. Description/deliver_via/tags are idempotent overwrites.
     pub async fn register(
         &self,
         agent: &str,
         description: &str,
         deliver_via: DeliverVia,
     ) -> AgentEntry {
+        self.register_tagged(agent, description, deliver_via, Vec::new())
+            .await
+    }
+
+    /// Like [`register`] but with team tags (RFC-005). An empty tag list
+    /// preserves previously-stored tags (idempotent re-registration keeps
+    /// its team; passing tags replaces them).
+    pub async fn register_tagged(
+        &self,
+        agent: &str,
+        description: &str,
+        deliver_via: DeliverVia,
+        tags: Vec<String>,
+    ) -> AgentEntry {
         let mut agents = self.agents.write().await;
         let entry = AgentEntry {
             agent: agent.to_string(),
             description: description.to_string(),
             deliver_via,
+            tags: if tags.is_empty() {
+                agents
+                    .get(agent)
+                    .map(|e| e.tags.clone())
+                    .unwrap_or_default()
+            } else {
+                tags
+            },
         };
         agents.insert(agent.to_string(), entry.clone());
         self.persist(&agents);
@@ -295,6 +322,25 @@ mod tests {
         assert_eq!(e.description, "quant, data guardian");
         assert!(e.deliver_via.is_push());
         assert!(reg.lookup("ghost").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn registry_register_tagged_persists_and_preserves() {
+        let reg = Registry::new();
+        reg.register_tagged("patricia", "pm", DeliverVia::Poll,
+                            vec!["fleet".into(), "pm-office".into()]).await;
+        let e = reg.lookup("patricia").await.unwrap();
+        assert_eq!(e.tags, vec!["fleet", "pm-office"]);
+        // Re-register without tags → tags preserved (idempotent upgrade-safe).
+        reg.register("patricia", "pm", DeliverVia::Poll).await;
+        assert_eq!(reg.lookup("patricia").await.unwrap().tags, vec!["fleet", "pm-office"]);
+        // Explicit new tags replace.
+        reg.register_tagged("patricia", "pm", DeliverVia::Poll,
+                            vec!["sho-pool".into()]).await;
+        assert_eq!(reg.lookup("patricia").await.unwrap().tags, vec!["sho-pool"]);
+        // Untagged agents default to empty, not garbage.
+        reg.register("anastasia", "worker", DeliverVia::Poll).await;
+        assert!(reg.lookup("anastasia").await.unwrap().tags.is_empty());
     }
 
     #[tokio::test]

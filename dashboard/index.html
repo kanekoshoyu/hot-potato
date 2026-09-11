@@ -112,6 +112,25 @@ const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.
 const RPC = location.origin + '/';
 const STATUS_ORDER = { queued: 0, delivered: 1, read: 2, acked: 3 };
 const AGENT_COLORS = ['#58a6ff','#3fb950','#d29922','#39c5cf','#bc8cff','#f85149','#ff7b72','#7ee787'];
+const TEAM_COLORS = {};   // team tag -> color, assigned on first sight
+let agentTags = {};       // agent name -> [tags] (from agent/list)
+
+// RFC-005: color by team tag (first tag wins); untagged agents get the old per-name cycle.
+function teamOf(name) { const t = agentTags[name]; return t && t.length ? t[0] : null; }
+function teamColor(name, indexInList) {
+  const t = teamOf(name);
+  if (!t) return AGENT_COLORS[indexInList % AGENT_COLORS.length];
+  if (!(t in TEAM_COLORS)) TEAM_COLORS[t] = AGENT_COLORS[Object.keys(TEAM_COLORS).length % AGENT_COLORS.length];
+  return TEAM_COLORS[t];
+}
+async function loadTags() {
+  try {
+    const r = await fetch(RPC, { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id:1, method:'agent/list', params:{}}) });
+    const d = await r.json();
+    (d.result || []).forEach(e => { agentTags[e.agent] = e.tags || []; });
+  } catch (e) { /* tags are cosmetic; never block the dashboard */ }
+}
 
 let letters = {};      // id -> letter
 let agents = new Set();
@@ -149,10 +168,11 @@ function renderAgents() {
   box.innerHTML = names.map((n, i) => {
     const inbox = Object.values(letters).filter(l => l.receiver === n).length;
     const out = Object.values(letters).filter(l => l.sender === n).length;
-    const c = AGENT_COLORS[i % AGENT_COLORS.length];
+    const c = teamColor(n, i);
+    const tag = teamOf(n);
     return `<div class="agent">
       <div class="avatar" style="background:${c}22;color:${c};border:1px solid ${c}55">${esc(n.slice(0,2).toUpperCase())}</div>
-      <div><div class="nm">${esc(n)}</div><div class="sub">↓${inbox} in · ↑${out} out</div></div>
+      <div><div class="nm">${esc(n)}</div><div class="sub">↓${inbox} in · ↑${out} out${tag ? ` · <span style="color:${c}">${esc(tag)}</span>` : ''}</div></div>
       <span class="badge">a2a</span>
     </div>`;
   }).join('') || '<div class="agent"><span class="sub">no letters yet</span></div>';
@@ -246,7 +266,7 @@ function renderGraph() {
 
   names.forEach((n, i) => {
     const [x, y] = pos[n];
-    const c = AGENT_COLORS[i % AGENT_COLORS.length];
+    const c = teamColor(n, i);
     const inflight = letters_list.filter(l => l.receiver === n && l.status === 'queued').length;
     const waiting = letters_list.filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
     svgStr += `<g class="node ${(inflight + waiting) > 0 ? 'hot' : ''}">
@@ -261,6 +281,7 @@ function renderGraph() {
 /* ---------- data boot ---------- */
 async function loadSnapshot() {
   try {
+    await loadTags();
     const r = await fetch(RPC, { method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/list', params:{}}) });
     const d = await r.json();
