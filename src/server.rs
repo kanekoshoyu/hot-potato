@@ -123,7 +123,7 @@ struct RpcRequest {
 async fn discover() -> Value {
     json!({
         "methods": [
-            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus"},
+            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus (optional: description, deliver_via, tags[])"},
             {"name":"message/send","params":["sender","receiver","type (task|reply|broadcast|ack_only)","subject","body","ref (required for reply)"],"desc":"pass a potato"},
             {"name":"message/poll","params":["agent","limit (optional, 0=all)"],"desc":"drain my mailbox; marks returned letters delivered (poll = claim)"},
             {"name":"message/peek","params":["agent"],"desc":"look without marking (queued letters only)"},
@@ -132,6 +132,7 @@ async fn discover() -> Value {
             {"name":"agent/status","params":["agent"],"desc":"lifecycle of everything this agent SENT"},
             {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
             {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)"],"desc":"OBSERVER: every letter on the bus, any status, read-only (v0.2)"},
+            {"name":"agent/list","params":[],"desc":"registry dump with team tags (dashboard legend) (RFC-005)"},
             {"name":"rpc.discover","params":[],"desc":"this document"}
         ]
     })
@@ -185,21 +186,47 @@ async fn rpc(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                // RFC-005: optional team tags (["team","fleet",...]).
+                let tags: Vec<String> = p
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let registry = registry.clone();
                 async move {
-                    let entry = registry.register(&agent, &description, deliver_via).await;
+                    let entry = registry
+                        .register_tagged(&agent, &description, deliver_via, tags)
+                        .await;
                     bus.register(&agent, role)
                         .await
                         .map(|_| {
                             json!({
                                 "registered": agent,
                                 "deliver_via": entry.deliver_via,
+                                "tags": entry.tags,
                             })
                         })
                         .map_err(|e| e.to_string())
                 }
             })
             .await
+        }
+        "agent/list" => {
+            // RFC-005: registry dump with tags — the dashboard's team legend.
+            let entries = registry.all().await;
+            Ok(json!(entries
+                .iter()
+                .map(|e| json!({
+                    "agent": e.agent,
+                    "description": e.description,
+                    "deliver_via": e.deliver_via,
+                    "tags": e.tags,
+                }))
+                .collect::<Vec<_>>()))
         }
         "message/send" => {
             parse5(&req.params, |sender, receiver, msg_type, subject, body| {
@@ -276,8 +303,12 @@ async fn rpc(
                         // authenticated with the shared token, that's the trust.
                         if !bus3.is_registered(&sender).await {
                             registry3
-                                .register(&sender, &format!("federated from {from_pool}"),
-                                          crate::deliver::DeliverVia::Poll)
+                                .register_tagged(
+                                    &sender,
+                                    &format!("federated from {from_pool}"),
+                                    crate::deliver::DeliverVia::Poll,
+                                    vec![from_pool.clone()],
+                                )
                                 .await;
                             bus3.register(&sender, crate::bus::Role::Worker)
                                 .await
@@ -307,10 +338,11 @@ async fn rpc(
                             // pattern as the inbound auto-registration).
                             if !bus3.is_registered(&receiver).await {
                                 registry3
-                                    .register(
+                                    .register_tagged(
                                         &receiver,
                                         &format!("federated at {}", peer.name()),
                                         crate::deliver::DeliverVia::Poll,
+                                        vec![peer.name().to_string()],
                                     )
                                     .await;
                                 bus3.register(&receiver, crate::bus::Role::Worker)
