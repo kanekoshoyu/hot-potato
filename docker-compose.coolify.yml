@@ -1,0 +1,19 @@
+# Coolify-friendly compose: no host networking, published ports only.
+services:
+  hot-potato:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+    environment:
+      HOT_POTATO_NAME: hot-potato
+      HOT_POTATO_DESCRIPTION: 'EventMessageBus for AI agents'
+      HOT_POTATO_URL: 'http://localhost:8080'
+      HOT_POTATO_DATA_DIR: /data
+      RUST_LOG: info
+    volumes:
+      - hot-potato-data:/data
+volumes:
+  hot-potato-data:
