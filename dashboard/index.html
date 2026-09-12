@@ -453,11 +453,12 @@ function renderGraph() {
     const inflight = Object.values(letters).filter(l => l.receiver === n && l.status === 'queued').length;
     const waiting = Object.values(letters).filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
     const active = (inflight + waiting) > 0;
+    const isSelected = drillMode === 'agent' && drillAgent === n;
     // color semantics — ONE system: yellow glow = active, dim grey = idle, white + 👤 = human
-    const stroke = isHuman ? '#e6edf3' : active ? '#ffd54d' : '#6e7681';
+    const stroke = isSelected ? '#58a6ff' : isHuman ? '#e6edf3' : active ? '#ffd54d' : '#6e7681';
     const label = isHuman ? '👤' + n.slice(0, 8) : n.slice(0, 9);
-    svgStr += `<g class="node ${active ? 'hot' : ''}" onclick="openDrill('agent','${esc(n)}')" style="cursor:pointer">
-      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${stroke}" style="filter:${active ? 'drop-shadow(0 0 7px #ffd54dcc)' : 'none'}"/>
+    svgStr += `<g class="node ${active ? 'hot' : ''} ${isSelected ? 'selected' : ''}" onclick="openDrill('agent','${esc(n)}')" style="cursor:pointer">
+      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${stroke}" style="filter:${isSelected ? 'drop-shadow(0 0 10px #58a6ffcc)' : active ? 'drop-shadow(0 0 7px #ffd54dcc)' : 'none'}"/>
       <text x="${x}" y="${y + 4}">${esc(label)}</text>
       <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : isHuman ? 'human' : 'idle'}</text>
     </g>`;
@@ -468,7 +469,12 @@ function renderGraph() {
     p.style.stroke = 'transparent'; p.style.strokeWidth = '24'; p.style.cursor = 'pointer'; p.style.fill = 'none';
     p.addEventListener('click', () => openDrill('pair', p.dataset.pair));
   });
-  // selected drill keeps highlight: title refresh handled by openDrill
+  // highlight the selected pair's edges (persists across the 4s re-render via drillMode)
+  if (drillMode === 'pair' && drillPair) {
+    svg.querySelectorAll('.edge-hit').forEach(p => { if (p.dataset.pair === drillPair) p.style.stroke = '#58a6ff'; });
+  }
+  // click on empty graph background = clear selection (Sho: deselect on background tap)
+  svg.onclick = (e) => { if (e.target.tagName === 'svg' || e.target.tagName === 'SCREEN') closeDrill(); };
 }
 
 /* ---------- per-agent in/out stats (tap a node) ---------- */
