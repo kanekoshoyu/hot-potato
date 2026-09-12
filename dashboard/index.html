@@ -539,27 +539,30 @@ function updateTriCount() {
 // adjustable filters — API-side (message/list max_age_secs / max_hops params)
 let filters = { max_hops: 9 };
 try { const saved = JSON.parse(localStorage.getItem('hp_filters')||'null'); if (saved && !saved.max_age_secs) filters = saved; } catch {}
-// Sho directive: graph + dataset show RUNNING potatoes only (queued/delivered/read
-// within the active window). Finished (acked) and long-stale threads are FILTERED
-// OUT, not faded. 'all' brings back the full history.
+// Sho directive: the freshness selector IS a hard time window — anything older
+// is filtered out of the dataset entirely (was: fade-only). 'all' = full history.
 let SHOW_ALL = false;
+let FRESH_MS = 120000; // 2 min default, set by the fAge selector
 window.saveFilters = function() {
   const age = parseInt($('fAge').value, 10);
   SHOW_ALL = age === 0;
+  FRESH_MS = age > 0 ? age * 1000 : Infinity;
   filters.max_hops = parseInt($('fHops').value, 10);
   localStorage.setItem('hp_filters', JSON.stringify({ max_hops: filters.max_hops, fresh: age }));
-  $('fNote').textContent = SHOW_ALL ? 'full history' : 'running only · scope ' + $('fHops').selectedOptions[0].text;
+  $('fNote').textContent = SHOW_ALL ? 'full history' : 'window ' + $('fAge').selectedOptions[0].text + ' · scope ' + $('fHops').selectedOptions[0].text;
   applyFilter(); renderAgents(); refreshStats(); renderGraph(); updateTriCount();
 };
 function applyFilter() {
   if (SHOW_ALL) return;
   const nowMs = Date.now();
-  // keep: anything not acked, plus acked letters still inside the active window
-  // (so just-finished threads don't pop out of existence instantly)
+  // freshness IS the time window: anything older than the selected window
+  // drops out of the dataset (any status). pending letters older than the
+  // window are stale — they stay queryable via 'all (full history)'.
+  const windowMs = FRESH_MS;
   for (const id of Object.keys(letters)) {
     const l = letters[id];
     const age = nowMs - parseTs(l.created_at);
-    if (l.status === 'acked' && age > ACTIVE_MS) delete letters[id];
+    if (age > windowMs) delete letters[id];
   }
 }
 function restoreFilterUI() {
@@ -569,7 +572,8 @@ function restoreFilterUI() {
   $('fAge').value = String(age);
   $('fHops').value = String(filters.max_hops);
   SHOW_ALL = age === 0;
-  $('fNote').textContent = SHOW_ALL ? 'full history' : 'running only · scope ' + $('fHops').selectedOptions[0].text;
+  FRESH_MS = age > 0 ? age * 1000 : Infinity;
+  $('fNote').textContent = SHOW_ALL ? 'full history' : 'window ' + $('fAge').selectedOptions[0].text + ' · scope ' + $('fHops').selectedOptions[0].text;
 }
 
 async function loadSnapshot() {
@@ -611,7 +615,7 @@ function connect() {
 }
 let TOKEN_NOTE_SHOWN = false;
 
-setInterval(() => { renderGraph(); updateTriCount(); if (drillMode === 'pair') renderPairDrill(drillPair); else if (drillMode === 'agent') agentStats(drillAgent); }, 4000);
+setInterval(() => { if (!SHOW_ALL) applyFilter(); renderGraph(); updateTriCount(); if (drillMode === 'pair') renderPairDrill(drillPair); else if (drillMode === 'agent') agentStats(drillAgent); }, 4000);
 window.addEventListener('resize', renderGraph);
 
 /* ---------- P1-1: drill-down panels (edge = pair threads, node = agent records) ---------- */
