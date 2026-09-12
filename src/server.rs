@@ -337,6 +337,30 @@ async fn rpc(
                                 hub3.emit("queued", &letter);
                             }
                         }
+                        // RFC-007: federated inbound letters get the same
+                        // push-on-arrival as local ones — otherwise cross-pool
+                        // letters wait for the receiver's poll cycle.
+                        let registry4 = registry3.clone();
+                        let bus4 = bus3.clone();
+                        let transport: Arc<dyn crate::deliver::PushTransport> =
+                            Arc::new(crate::deliver::HttpTransport::new());
+                        let push_receiver = receiver.clone();
+                        let push_id = id.clone();
+                        tokio::spawn(async move {
+                            let stored = bus4.peek(&push_receiver).await;
+                            let Some(letter) = stored.ok().and_then(|v| {
+                                v.into_iter().find(|m| m.id == push_id)
+                            }) else { return };
+                            let push_letter = serde_json::to_value(&letter).expect("letter json");
+                            let outcome = crate::deliver::dispatch_push(
+                                &registry4, &transport, &push_receiver, &push_letter,
+                            ).await;
+                            if let crate::deliver::PushOutcome::Pushed = outcome {
+                                if let Ok(m) = bus4.mark_delivered(&push_receiver, &push_id).await {
+                                    hub3.emit("delivered", &m);
+                                }
+                            }
+                        });
                         return Ok(json!({"id": id, "forwarded": true, "to_pool": from_pool}));
                     }
 
