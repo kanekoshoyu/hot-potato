@@ -147,7 +147,7 @@
             <option value="120">2 min</option>
             <option value="600">10 min</option>
             <option value="3600">1 h</option>
-            <option value="0">all (no fade)</option>
+            <option value="0">all (full history)</option>
           </select>
         </label>
         <label>scope
@@ -524,23 +524,37 @@ function updateTriCount() {
 // adjustable filters — API-side (message/list max_age_secs / max_hops params)
 let filters = { max_hops: 9 };
 try { const saved = JSON.parse(localStorage.getItem('hp_filters')||'null'); if (saved && !saved.max_age_secs) filters = saved; } catch {}
-let FRESH_MS = 120000; // visual fade threshold, adjusted by freshness selector
+// Sho directive: graph + dataset show RUNNING potatoes only (queued/delivered/read
+// within the active window). Finished (acked) and long-stale threads are FILTERED
+// OUT, not faded. 'all' brings back the full history.
+let SHOW_ALL = false;
 window.saveFilters = function() {
   const age = parseInt($('fAge').value, 10);
-  FRESH_MS = age > 0 ? age * 1000 : 7 * 24 * 3600 * 1000; // 'all' ≈ never fade
+  SHOW_ALL = age === 0;
   filters.max_hops = parseInt($('fHops').value, 10);
   localStorage.setItem('hp_filters', JSON.stringify({ max_hops: filters.max_hops, fresh: age }));
-  $('fNote').textContent = 'fade >' + $('fAge').selectedOptions[0].text + ' · scope ' + $('fHops').selectedOptions[0].text;
-  loadSnapshot(); renderGraph(); if (currentView === 'potatoes') renderPotatoes();
+  $('fNote').textContent = SHOW_ALL ? 'full history' : 'running only · scope ' + $('fHops').selectedOptions[0].text;
+  applyFilter(); renderAgents(); refreshStats(); renderGraph(); updateTriCount();
 };
+function applyFilter() {
+  if (SHOW_ALL) return;
+  const nowMs = Date.now();
+  // keep: anything not acked, plus acked letters still inside the active window
+  // (so just-finished threads don't pop out of existence instantly)
+  for (const id of Object.keys(letters)) {
+    const l = letters[id];
+    const age = nowMs - parseTs(l.created_at);
+    if (l.status === 'acked' && age > ACTIVE_MS) delete letters[id];
+  }
+}
 function restoreFilterUI() {
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('hp_filters')||'{}'); } catch {}
   const age = saved.fresh !== undefined ? saved.fresh : 120;
   filters.max_hops = saved.max_hops !== undefined ? saved.max_hops : 9;
   $('fAge').value = String(age);
   $('fHops').value = String(filters.max_hops);
-  FRESH_MS = age > 0 ? age * 1000 : 7 * 24 * 3600 * 1000;
-  $('fNote').textContent = 'fade >' + $('fAge').selectedOptions[0].text + ' · scope ' + $('fHops').selectedOptions[0].text;
+  SHOW_ALL = age === 0;
+  $('fNote').textContent = SHOW_ALL ? 'full history' : 'running only · scope ' + $('fHops').selectedOptions[0].text;
 }
 
 async function loadSnapshot() {
@@ -550,6 +564,7 @@ async function loadSnapshot() {
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/list', params: {...filters}}) });
     const d = await r.json();
     (d.result || []).forEach(l => { upsertLetter(l); });
+    applyFilter();
     const feed = $('feed'); feed.innerHTML = ''; feedCount = 0;
     Object.values(letters).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')).slice(0, 40)
       .forEach(l => feedLine(l.status, l));
