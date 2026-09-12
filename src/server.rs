@@ -243,11 +243,13 @@ async fn rpc(
                     })
                     .unwrap_or_default();
                 let registry = registry.clone();
+                let bus_re = bus.clone();
                 async move {
                     let entry = registry
                         .register_tagged(&agent, &description, deliver_via, tags)
                         .await;
-                    bus.register(&agent, role)
+                    let out = bus
+                        .register(&agent, role)
                         .await
                         .map(|_| {
                             json!({
@@ -256,7 +258,39 @@ async fn rpc(
                                 "tags": entry.tags,
                             })
                         })
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string());
+                    // Re-push on register (Patricia find A, 2026-09-12): queued
+                    // letters sent while the receiver had no live push transport
+                    // (unregistered / poll-only / endpoint down) never get a
+                    // second dispatch — recovery was poll-only. Now every fresh
+                    // register retries the whole queue fire-and-forget.
+                    let re_agent = agent.clone();
+                    let registry2 = registry.clone();
+                    let bus2 = bus_re.clone();
+                    let transport: Arc<dyn crate::deliver::PushTransport> =
+                        Arc::new(crate::deliver::HttpTransport::new());
+                    tokio::spawn(async move {
+                        let Ok(queued) = bus2.peek(&re_agent).await else { return };
+                        for letter in queued {
+                            let push_letter =
+                                serde_json::to_value(&letter).expect("letter json");
+                            let outcome = crate::deliver::dispatch_push(
+                                &registry2,
+                                &transport,
+                                &re_agent,
+                                &push_letter,
+                            )
+                            .await;
+                            if let crate::deliver::PushOutcome::Pushed = outcome {
+                                if let Ok(m) =
+                                    bus2.mark_delivered(&re_agent, &letter.id).await
+                                {
+                                    hub.emit("delivered", &m);
+                                }
+                            }
+                        }
+                    });
+                    out
                 }
             })
             .await
