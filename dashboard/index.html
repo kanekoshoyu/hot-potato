@@ -283,7 +283,7 @@ function renderAgents() {
       <div><div class="nm">${esc(n)}</div><div class="sub">↓${inbox} in · ↑${out} out${tag ? ` · <span style="color:${c}">${esc(tag)}</span>` : ''}</div></div>
       <span class="badge">a2a</span>
     </div>`;
-  }).join('') || '<div class="agent"><span class="sub">no letters yet</span></div>';
+  }).join('') || '<div class="agent"><span class="sub">no potatoes yet</span></div>';
 }
 
 function feedLine(evt, l) {
@@ -356,7 +356,7 @@ function renderGraph() {
   // 'all' is a broadcast address, 'sho' is the TG<->bus bridge mailbox (human's pipe) —
   // neither is an AI agent; never draw them as nodes.
   const names = [...agents].filter(n => n && n.toLowerCase() !== 'all' && n.toLowerCase() !== 'sho').sort();
-  if (names.length === 0) { svg.innerHTML = `<text x="50%" y="50%" fill="#8b949e" text-anchor="middle">waiting for letters…</text>`; return; }
+  if (names.length === 0) { svg.innerHTML = `<text x="50%" y="50%" fill="#8b949e" text-anchor="middle">There is no potato available — let your agent send a potato to another agent 🥔</text>`; return; }
   const cx = W/2, cy = H/2;
   const R = Math.max(90, Math.min(W, H)/2 - (isMobile ? 44 : 60));
   const pos = {};
@@ -617,7 +617,7 @@ function renderPairDrill(pairKey) {
   });
   const sorted = Object.entries(threads)
     .sort((a,b) => (b[1][0].created_at||'').localeCompare(a[1][0].created_at||''));
-  if (sorted.length === 0) { $('drillPanel').innerHTML = `<div class="potato"><span class="age">no letters between ${esc(ps)} and ${esc(pr)}</span></div>`; return; }
+  if (sorted.length === 0) { $('drillPanel').innerHTML = `<div class="potato"><span class="age">no potatoes between ${esc(ps)} and ${esc(pr)}</span></div>`; return; }
   const nowMs = Date.now();
   const fmtAgo = ts => {
     const t = parseTs(ts); if (isNaN(t)) return '—';
