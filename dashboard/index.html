@@ -128,12 +128,7 @@
 
   <div style="display:flex; flex-direction:column; gap:16px;">
     <div class="panel graph-panel">
-      <h2>
-        <span class="viewtabs">
-          <button class="vtab sel" id="tabAgents" onclick="switchView('agents')">Agents</button>
-          <button class="vtab" id="tabPotatoes" onclick="switchView('potatoes')">🥔 Potatoes</button>
-        </span>
-      </h2>
+      <h2>Agent graph <span style="text-transform:none;color:var(--dim);font-weight:400" id="triCount"></span></h2>
       <div class="legend">
         <span class="li"><span class="sw solid"></span>in flight (queued)</span>
         <span class="li"><span class="sw dashed"></span>waiting on reply</span>
@@ -160,7 +155,12 @@
         <span id="fNote" style="color:var(--dim);font-size:10px"></span>
       </div>
       <div class="graph-wrap"><svg id="graph"></svg></div>
-      <div id="potatoView" style="display:none"></div>
+      <div class="filterbar" id="drillbar" style="display:none; border-top:1px solid var(--border)">
+        <span id="drillTitle" style="font-weight:600;color:var(--text)"></span>
+        <span style="flex:1"></span>
+        <button class="vtab" onclick="closeDrill()">✕ close</button>
+      </div>
+      <div id="drillPanel" style="display:none; max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch"></div>
     </div>
     <div class="panel">
       <h2>Live feed <span id="feedCount"></span></h2>
@@ -349,6 +349,11 @@ function renderGraph() {
       const mk = i === 0 ? marker : 'arr';
       svgStr += `<path class="${line}" d="M${x1},${y1} Q${mx},${my} ${ex},${ey}" fill="none" marker-end="url(#${mk})" opacity="${ageOp}"/>`;
     });
+    // R1.2: transparent wide hit-path over the NEWEST edge → pair drill
+    const hx1 = x1, hy1 = y1;
+    const hdx = (y2 - y1), hdy = (x1 - x2);
+    const hmx = (x1+x2)/2 + (y2-y1)*0.08, hmy = (y1+y2)/2 + (x1-x2)*0.08;
+    svgStr += `<path class="edge-hit" data-pair="${esc(k)}" d="M${hx1},${hy1} Q${hmx},${hmy} ${ex},${ey}" fill="none" opacity="0"/>`;
   }
 
   names.forEach((n) => {
@@ -360,13 +365,19 @@ function renderGraph() {
     // color semantics — ONE system: yellow glow = active, dim grey = idle, white + 👤 = human
     const stroke = isHuman ? '#e6edf3' : active ? '#ffd54d' : '#6e7681';
     const label = isHuman ? '👤' + n.slice(0, 8) : n.slice(0, 9);
-    svgStr += `<g class="node ${active ? 'hot' : ''}" onclick="agentStats('${esc(n)}')" style="cursor:pointer">
+    svgStr += `<g class="node ${active ? 'hot' : ''}" onclick="openDrill('agent','${esc(n)}')" style="cursor:pointer">
       <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${stroke}" style="filter:${active ? 'drop-shadow(0 0 7px #ffd54dcc)' : 'none'}"/>
       <text x="${x}" y="${y + 4}">${esc(label)}</text>
       <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : isHuman ? 'human' : 'idle'}</text>
     </g>`;
   });
+  // R1.2: bind edge clicks (hit-paths), then swap svg content in
   svg.innerHTML = svgStr;
+  svg.querySelectorAll('.edge-hit').forEach(p => {
+    p.style.stroke = 'transparent'; p.style.strokeWidth = '24'; p.style.cursor = 'pointer'; p.style.fill = 'none';
+    p.addEventListener('click', () => openDrill('pair', p.dataset.pair));
+  });
+  // selected drill keeps highlight: title refresh handled by openDrill
 }
 
 /* ---------- per-agent in/out stats (tap a node) ---------- */
@@ -392,7 +403,8 @@ window.agentStats = function(n) {
   };
   const dir = l => l.sender === n ? `→ ${l.receiver}` : `← ${l.sender}`;
   $('inspId').textContent = n.slice(0, 12) + ' · stats';
-  $('inspector').innerHTML =
+  const target = $('drillPanel').style.display !== 'none' ? $('drillPanel') : $('inspector');
+  target.innerHTML =
     `<b>📥 IN</b>   total ${inn.length}\n` +
     `   new (未处理)      ${inQ}\n` +
     `   processing (处理中) ${inP}\n` +
@@ -405,8 +417,32 @@ window.agentStats = function(n) {
     mine.map(l =>
       ` ${dir(l)}  [${esc(l.status)}] ${fmtDur(l)} — ${esc((l.subject||'').slice(0,36))}`
     ).join('\n');
-  if (window.innerWidth < 700) $('inspector').scrollIntoView({behavior:'smooth', block:'nearest'});
+  if (window.innerWidth < 700) $('drillbar').scrollIntoView({behavior:'smooth', block:'nearest'});
 };
+
+/* R2.5: tri-count in graph header (active · blocked · stale) */
+function updateTriCount() {
+  const all = Object.values(letters);
+  const byId = {}; all.forEach(l => byId[l.id] = l);
+  const threads = {};
+  all.forEach(l => {
+    let cur = l, guard = 0;
+    while (cur.ref && byId[cur.ref] && guard++ < 10) cur = byId[cur.ref];
+    (threads[cur.id] || (threads[cur.id] = [])).push(l);
+  });
+  const nowMs = Date.now();
+  let active = 0, blocked = 0, stale = 0;
+  for (const ls of Object.values(threads)) {
+    const hops = ls.slice().sort((a,b) => (a.created_at||'').localeCompare(b.created_at||''));
+    const last = hops[hops.length - 1];
+    if (last.status === 'acked') continue;
+    const age = nowMs - parseTs(last.created_at);
+    if (age <= ACTIVE_MS) { active++; if (last.status !== 'queued') blocked++; }
+    else stale++;
+  }
+  const el = $('triCount');
+  if (el) el.textContent = `— ${active} active · ${blocked} blocked · ${stale} stale`;
+}
 
 /* ---------- data boot ---------- */
 // adjustable filters — API-side (message/list max_age_secs / max_hops params)
@@ -459,7 +495,7 @@ function connect() {
     if (!l.id) return;
     upsertLetter(Object.assign({}, l, { status: d.event === 'queued' ? 'queued' : (l.status || d.event) }));
     feedLine(d.event, letters[l.id]);
-    refreshStats(); renderAgents(); renderGraph();
+    refreshStats(); renderAgents(); renderGraph(); updateTriCount();
   };
   ws.onclose = () => {
     $('dot').classList.remove('live'); $('connTxt').textContent = 'reconnecting…';
@@ -468,73 +504,89 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-setInterval(() => { renderGraph(); if (currentView === 'potatoes') renderPotatoes(); }, 4000);
+setInterval(() => { renderGraph(); updateTriCount(); if (drillMode === 'pair') renderPairDrill(drillPair); else if (drillMode === 'agent') agentStats(drillAgent); }, 4000);
 window.addEventListener('resize', renderGraph);
 
-/* ---------- view switcher + potato (thread) view ---------- */
-let currentView = 'agents';
-window.switchView = function(v) {
-  currentView = v;
-  $('tabAgents').classList.toggle('sel', v === 'agents');
-  $('tabPotatoes').classList.toggle('sel', v === 'potatoes');
-  document.querySelector('.graph-wrap').style.display = v === 'agents' ? '' : 'none';
-  document.querySelector('.legend').style.display = v === 'agents' ? '' : 'none';
-  $('potatoView').style.display = v === 'potatoes' ? '' : 'none';
-  if (v === 'potatoes') renderPotatoes();
+/* ---------- P1-1: drill-down panels (edge = pair threads, node = agent records) ---------- */
+let drillMode = null, drillPair = null, drillAgent = null;
+window.closeDrill = function() {
+  drillMode = null; drillPair = null; drillAgent = null;
+  $('drillbar').style.display = 'none';
+  $('drillPanel').style.display = 'none';
 };
+function openDrill(mode, key) {
+  drillMode = mode;
+  if (mode === 'pair') { drillPair = key; drillAgent = null; renderPairDrill(key); }
+  else { drillAgent = key; drillPair = null; agentStats(key); }
+  $('drillbar').style.display = 'flex';
+  $('drillPanel').style.display = 'block';
+  $('drillTitle').textContent = mode === 'pair'
+    ? `🥔 thread: ${key.split('|')[0]} ↔ ${key.split('|')[1]}`
+    : `👤 agent: ${key}`;
+  if (window.innerWidth < 700) $('drillbar').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
 
-function renderPotatoes() {
-  const all = Object.values(letters);
+/* pair drill: potato thread table filtered to this sender|receiver pair */
+function renderPairDrill(pairKey) {
+  const [ps, pr] = pairKey.split('|');
+  const all = Object.values(letters).filter(l =>
+    (l.sender === ps && l.receiver === pr) || (l.sender === pr && l.receiver === ps));
   const byId = {}; all.forEach(l => byId[l.id] = l);
-  // group into potatoes: root = letter that nobody refs; thread = root + all letters ref'ing it (any depth)
-  const refd = new Set(all.map(l => l.ref).filter(Boolean));
   const threads = {};
   all.forEach(l => {
-    // walk up to root
     let cur = l, guard = 0;
     while (cur.ref && byId[cur.ref] && guard++ < 10) cur = byId[cur.ref];
-    const rootId = cur.id;
-    (threads[rootId] || (threads[rootId] = [])).push(l);
+    (threads[cur.id] || (threads[cur.id] = [])).push(l);
   });
+  const sorted = Object.entries(threads)
+    .sort((a,b) => (b[1][0].created_at||'').localeCompare(a[1][0].created_at||''));
+  if (sorted.length === 0) { $('drillPanel').innerHTML = `<div class="potato"><span class="age">no letters between ${esc(ps)} and ${esc(pr)}</span></div>`; return; }
   const nowMs = Date.now();
   const fmtAgo = ts => {
-    const t = parseTs(ts);
-    if (isNaN(t)) return '—';
+    const t = parseTs(ts); if (isNaN(t)) return '—';
     const sec = Math.max(0, Math.round((nowMs - t)/1000));
     return sec < 60 ? sec + 's' : sec < 3600 ? Math.round(sec/60) + 'm' : Math.round(sec/3600) + 'h';
   };
-  const sorted = Object.entries(threads)
-    .sort((a,b) => (b[1][0].created_at||'').localeCompare(a[1][0].created_at||''))
-    .slice(0, 20);
-  let out = `<div style="padding:8px 14px;color:var(--dim);font-size:11px;font-family:var(--mono);border-bottom:1px solid var(--border)">🥔 each potato = a task thread (root + replies via ref) · <span style="color:var(--red)">BLOCKED</span> = waiting too long · faded = older than 2min</div>`;
+  let out = '';
   for (const [rootId, ls] of sorted) {
-    const root = byId[rootId];
-    if (!root) continue;
+    const root = byId[rootId]; if (!root) continue;
     const hops = ls.sort((a,b) => (a.created_at||'').localeCompare(b.created_at||''));
     const last = hops[hops.length - 1];
-    const stale = ageMs(last) > FRESH_MS && last.status !== 'acked';
-    const blocked = last.status === 'delivered' || last.status === 'read' || last.status === 'queued';
-    const blockedBy = blocked ? last.receiver : null;
-    const ageOp = ageMs(root) > FRESH_MS ? 0.45 : 1;
-    out += `<div class="potato ${ageOp < 1 ? '' : 'fresh-root'}" style="opacity:${ageOp}">
+    const cl = threadClass(last, nowMs);
+    out += `<div class="potato ${cl.cls}" style="opacity:${cl.op}">
       <div><span class="hid" onclick="inspect('${rootId}')">${rootId.slice(0,8)}</span>
-        <span class="root">${esc((root.subject || '(no subject)').slice(0, 52))}</span>
+        <span class="root">${esc((root.subject || '(no subject)').slice(0, 56))}</span>
         <span class="age">· ${fmtAgo(root.created_at)} old · ${hops.length} hop${hops.length > 1 ? 's' : ''}</span>
-        ${stale && blocked ? `<span class="btag" style="color:var(--red)">BLOCKED → ${esc(blockedBy)}</span>` : last.status === 'acked' ? '<span style="color:var(--green)">✓ closed</span>' : ''}
+        ${cl.tag}
       </div>`;
     for (const h of hops.slice(-4)) {
-      const hStale = ageMs(h) > FRESH_MS;
-      const isBlock = h === last && blocked;
+      const isBlock = h === last && cl.blocked;
       out += `<div class="hop ${isBlock ? 'blocked' : ''}">
         <span class="dir">${esc(h.sender)} → ${esc(h.receiver)}</span>
         <span class="pill ${h.status}">${h.status}</span>
-        <span class="age ${hStale ? 'stale' : ''}">${fmtAgo(h.created_at)} ago${isBlock ? ` · waiting on ${esc(h.receiver)}` : ''}</span>
-        ${isBlock ? '<span class="btag">BLOCKED</span>' : ''}
+        <span class="age">${fmtAgo(h.created_at)} ago${isBlock ? ` · waiting on ${esc(h.receiver)}` : ''}</span>
       </div>`;
     }
     out += `</div>`;
   }
-  $('potatoView').innerHTML = out;
+  $('drillPanel').innerHTML = out;
+}
+
+/* ---------- P1-2: thread state classification (active / blocked / stale / closed) ---------- */
+const ACTIVE_MS = 30 * 60 * 1000; // 30 min active window (independent of fAge freshness)
+function threadClass(last, nowMs) {
+  if (last.status === 'acked') return { cls: '', op: 0.6, blocked: false,
+    tag: '<span style="color:var(--green)">✓ closed</span>' };
+  const age = nowMs - parseTs(last.created_at);
+  const inWindow = age <= ACTIVE_MS;
+  const blocked = last.status === 'delivered' || last.status === 'read' || last.status === 'queued';
+  if (blocked && inWindow) {
+    const mins = Math.max(1, Math.round(age / 60000));
+    return { cls: 'fresh-root', op: 1, blocked: true,
+      tag: `<span class="btag" style="color:var(--red)">BLOCKED → ${esc(last.receiver)} · ${mins}m</span>` };
+  }
+  // stale: old + unresolved → grey, folded into stale group, NOT red
+  return { cls: '', op: 0.45, blocked: false, tag: '<span class="age">stale</span>' };
 }
 
 restoreFilterUI();
