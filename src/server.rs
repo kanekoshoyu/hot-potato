@@ -285,7 +285,10 @@ async fn rpc(
                 async move {
                     // (1) inbound from a federated peer bus?
                     if let Some(from_pool) = fed_headers {
-                        if !authed {
+                        // Token required only when this bus has one configured.
+                        // Auth-off pools (day-1 federation) accept the letter;
+                        // the X-Potato-Pool header + envelope are still mandatory.
+                        if config.bearer_token.is_some() && !authed {
                             return Err("federated send requires the pool bearer token".into());
                         }
                         if hops == 0 || forwarded_from.is_none() {
