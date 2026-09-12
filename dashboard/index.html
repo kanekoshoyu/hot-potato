@@ -103,9 +103,62 @@
 
 <footer>
   Hot Potato — a mailbox with a state machine ·
+  <a href="#" onclick="openFederation();return false">federation</a> ·
   <a href="/openapi.json">openapi</a> · <a href="/log">chatlog</a> · <a href="/health">health</a> ·
   built by <a href="https://github.com/kanekoshoyu/hot-potato">Daometric Agents</a>
 </footer>
+
+<div id="fedModal" style="display:none;position:fixed;inset:0;background:#000c;z-index:99;align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid #30363d;border-radius:10px;padding:22px;max-width:520px;width:92%;font-family:var(--mono);font-size:12px">
+    <h2 style="margin:0 0 12px;color:var(--text)">🥔 Federation</h2>
+    <div style="color:var(--dim);margin-bottom:8px">Connect two pools peer-to-peer. No config files: invite → join → automatic three-way handshake.</div>
+    <button onclick="doInvite()" style="background:var(--blue);color:#000;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer">Invite a peer</button>
+    <div id="inviteOut" style="margin:10px 0;color:var(--yellow);word-break:break-all"></div>
+    <hr style="border-color:#30363d;margin:14px 0">
+    <div style="color:var(--dim);margin-bottom:6px">Paste an invite code from the other pool:</div>
+    <input id="joinCode" placeholder="hp-xxxx…" style="width:100%;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
+    <input id="joinUrl" placeholder="your url as reachable by them, e.g. http://host:8082/" style="width:100%;margin-top:6px;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
+    <input id="joinName" placeholder="this pool's name, e.g. fleet" style="width:100%;margin-top:6px;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
+    <input id="joinAgents" placeholder="local agents, comma separated" style="width:100%;margin-top:6px;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
+    <button onclick="doJoin()" style="margin-top:10px;background:#238636;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer">Join peer</button>
+    <div id="joinOut" style="margin-top:10px;color:var(--blue);word-break:break-all"></div>
+    <div id="peersOut" style="margin-top:12px;color:var(--dim)"></div>
+    <div style="text-align:right;margin-top:10px"><a href="#" onclick="document.getElementById('fedModal').style.display='none';return false" style="color:var(--dim)">close</a></div>
+  </div>
+</div>
+<script>
+async function openFederation(){
+  document.getElementById('fedModal').style.display='flex';
+  try{
+    const r=await rpcCall('peer/list',{});
+    document.getElementById('peersOut').textContent='peers: '+(r.result||[]).map(p=>p.name+'('+(p.agents||[]).length+' agents, '+p.auth+')').join(', ')||'none yet';
+  }catch(e){}
+}
+async function rpcCall(method,params){
+  const r=await fetch(RPC,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
+  const d=await r.json();
+  if(d.error) throw new Error(d.error.message||'rpc error');
+  return d;
+}
+async function doInvite(){
+  try{
+    const d=await rpcCall('peer/invite',{});
+    document.getElementById('inviteOut').textContent='code: '+d.result.code+' (valid 10 min)';
+  }catch(e){document.getElementById('inviteOut').textContent='error: '+e.message}
+}
+async function doJoin(){
+  const agents=document.getElementById('joinAgents').value.split(',').map(s=>s.trim()).filter(Boolean);
+  try{
+    const d=await rpcCall('peer/join',{
+      code:document.getElementById('joinCode').value.trim(),
+      url:document.getElementById('joinUrl').value.trim(),
+      name:document.getElementById('joinName').value.trim(),
+      agents});
+    document.getElementById('joinOut').textContent=JSON.stringify(d.result);
+  }catch(e){document.getElementById('joinOut').textContent='error: '+e.message}
+}
+</script>
 
 <script>
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';

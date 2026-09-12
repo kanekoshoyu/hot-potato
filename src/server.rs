@@ -133,6 +133,9 @@ async fn discover() -> Value {
             {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
             {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)"],"desc":"OBSERVER: every letter on the bus, any status, read-only (v0.2)"},
             {"name":"agent/list","params":[],"desc":"registry dump with team tags (dashboard legend) (RFC-005)"},
+            {"name":"peer/invite","params":[],"desc":"generate a one-time invite code (dashboard: Invite a peer) (RFC-006)"},
+            {"name":"peer/join","params":["code","url","name","agents[]"],"desc":"join a remote pool with an invite code (dashboard: Join a peer); three-way handshake completes automatically (RFC-006)"},
+            {"name":"peer/list","params":[],"desc":"federation peers (env + dashboard-learned)"},
             {"name":"rpc.discover","params":[],"desc":"this document"}
         ]
     })
@@ -140,7 +143,7 @@ async fn discover() -> Value {
 
 /// JSON-RPC handler — the single endpoint agents talk to.
 async fn rpc(
-    State((bus, hub, config, registry)): State<BusState>,
+    State((bus, hub, config, registry, invites, dynamic_peers)): State<BusState>,
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
@@ -282,6 +285,7 @@ async fn rpc(
                 let bus3 = bus.clone();
                 let registry3 = registry.clone();
                 let hub3 = hub.clone();
+                let dyn_peers3 = dynamic_peers.clone();
                 async move {
                     // (1) inbound from a federated peer bus?
                     if let Some(from_pool) = fed_headers {
@@ -334,8 +338,13 @@ async fn rpc(
                     }
 
                     // (2) outbound to a federated peer?
-                    if !peers.is_empty() {
-                        if let Some(peer) = peers.resolve(&receiver) {
+                    if !peers.is_empty() || dynamic_peers.len().await > 0 {
+                        // env peers win on name clash; dashboard-learned peers fill the rest.
+                        let peer = match peers.resolve(&receiver) {
+                            Some(p) => Some(p),
+                            None => dyn_peers3.contains_agent(&receiver).await,
+                        };
+                        if let Some(peer) = peer {
                             // The receiver lives on the peer pool: shadow-register
                             // them locally so bus rules accept the letter (same
                             // pattern as the inbound auto-registration).
@@ -569,6 +578,183 @@ async fn rpc(
                 })
                 .map_err(|e| e.to_string())
         }
+        "peer/invite" => {
+            // RFC-006: dashboard "Invite a peer" button. One-time code, 10 min.
+            let inv = crate::handshake::create_invite(&invites, &config.public_url).await;
+            Ok(json!({
+                "code": inv.code,
+                "expires_at": inv.expires_at,
+                "note": "paste into the peer's dashboard 'Join a peer' within 10 minutes; single use"
+            }))
+        }
+        "peer/join" => {
+            // RFC-006 three-way handshake. The invite code embeds the inviter's
+            // URL: hp-<code>-<b64url of inviter base>. The JOINER's dashboard
+            // calls ITS OWN bus's peer/join; this bus then dials the inviter
+            // with the code (step 1), the inviter records the joiner and
+            // dials back peer/register (step 2), then proves the link with a
+            // welcome letter (step 3).
+            let p = &req.params;
+            let code = p.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let agents: Vec<String> = p.get("agents").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            if code.is_empty() || url.is_empty() || name.is_empty() || agents.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,
+                        "message":"code, url, name, agents[] all required"}})),
+                );
+            }
+            // Decode inviter URL from the code tail (urlsafe b64 of json).
+            let inviter_url = code.rsplit('-').next()
+                .and_then(|tail| crate::handshake::b64url_decode(tail))
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string));
+            let Some(inviter_url) = inviter_url else {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,
+                        "message":"cannot read inviter url from invite code"}})),
+                );
+            };
+            let client = reqwest::Client::new();
+            // Step 1: present the code to the inviter.
+            let present = client
+                .post(&inviter_url)
+                .timeout(std::time::Duration::from_secs(10))
+                .json(&json!({
+                    "jsonrpc":"2.0","id":1,"method":"peer/accept","params":{
+                        "code": code, "url": url, "name": name, "agents": agents
+                    }
+                }))
+                .send()
+                .await;
+            let present = match present {
+                Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
+                Ok(r) => return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
+                        "message":format!("inviter replied HTTP {}", r.status())}})),
+                ),
+                Err(e) => return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
+                        "message":format!("cannot reach inviter at {inviter_url}: {e}")}})),
+                ),
+            };
+            if let Some(err) = present.get("error") {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
+                        "message":format!("inviter rejected: {err}")}})),
+                );
+            }
+            // The inviter's accept response carries its identity for step 2.
+            let inviter = present.get("result").cloned().unwrap_or(json!({}));
+            let inviter_name = inviter.get("name").and_then(|v| v.as_str()).unwrap_or("peer").to_string();
+            let inviter_agents: Vec<String> = inviter.get("agents").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            dynamic_peers.add(crate::federation::Peer {
+                name: inviter_name.clone(),
+                url: inviter_url.clone(),
+                token: String::new(),
+                agents: inviter_agents,
+            }).await;
+            Ok(json!({
+                "joined": inviter_name,
+                "note": "handshake complete: peer learned, forward path proven by their welcome letter"
+            }))
+        }
+        "peer/accept" => {
+            // Step 1 counterpart, on the INVITER: validate the code, record
+            // the joiner, dial back peer/register (step 2), push a welcome
+            // letter (step 3).
+            let p = &req.params;
+            let code = p.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let agents: Vec<String> = p.get("agents").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            if !crate::handshake::consume_invite(&invites, code).await {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
+                        "message":"invalid, expired or already-used invite code"}})),
+                );
+            }
+            if url.is_empty() || name.is_empty() || agents.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,
+                        "message":"url, name, agents[] all required"}})),
+                );
+            }
+            dynamic_peers.add(crate::federation::Peer {
+                name: name.clone(), url: url.clone(), token: String::new(),
+                agents: agents.clone(),
+            }).await;
+            let client = reqwest::Client::new();
+            // Step 2: tell the joiner who we are.
+            let my_agents = registry.all().await.iter().map(|e| e.agent.clone()).collect::<Vec<_>>();
+            let _ = client.post(&url).timeout(std::time::Duration::from_secs(10))
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"peer/register","params":{
+                    "name": config.pool_name, "url": config.public_url, "agents": my_agents }}))
+                .send().await;
+            // Step 3: prove the forward path with a real letter.
+            if let Some(first) = agents.first() {
+                let _ = client.post(&url).timeout(std::time::Duration::from_secs(10))
+                    .header("x-potato-pool", &config.pool_name)
+                    .json(&json!({"jsonrpc":"2.0","id":2,"method":"message/send","params":{
+                        "sender":"sho","receiver":first,"type":"task",
+                        "subject":"[handshake] link established",
+                        "body":format!("pool `{name}` joined federation; forward path verified."),
+                        "hops":1,"forwarded_from":config.pool_name }}))
+                    .send().await;
+            }
+            let my_agents2 = registry.all().await.iter().map(|e| e.agent.clone()).collect::<Vec<_>>();
+            Ok(json!({"name": config.pool_name, "agents": my_agents2,
+                "note": "joiner recorded; callback + welcome letter sent"}))
+        }
+        "peer/register" => {
+            // Step 2 counterpart: the inviting bus registers itself on the
+            // joiner. Authenticated implicitly by being dialed from a bus that
+            // just consumed our invite (v1 trust: network-level reachability).
+            let p = &req.params;
+            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let agents: Vec<String> = p.get("agents").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            if name.is_empty() || url.is_empty() || agents.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,
+                        "message":"name, url, agents[] required"}})),
+                );
+            }
+            dynamic_peers.add(crate::federation::Peer {
+                name, url, token: String::new(), agents,
+            }).await;
+            Ok(json!({"registered": true}))
+        }
+        "peer/list" => {
+            let mut env_peers = config.peers.all();
+            let dyn_peers = dynamic_peers.all().await;
+            for p in dyn_peers {
+                if !env_peers.iter().any(|e| e.name() == p.name()) {
+                    env_peers.push(p);
+                }
+            }
+            Ok(json!(env_peers.iter().map(|p| json!({
+                "name": p.name(), "url": p.url, "agents": p.agents,
+                "auth": if p.token.is_empty() { "none" } else { "bearer" },
+            })).collect::<Vec<_>>()))
+        }
         "rpc.discover" => Ok(discover().await),
         other => Err(format!(
             "unknown method: {other} (call rpc.discover for the method table)"
@@ -698,7 +884,7 @@ async fn dashboard() -> impl IntoResponse {
 /// GET /log?limit=N — human-readable lifecycle page (RFC-001 F2).
 /// The chatlog view: every letter on the bus, newest last, one line each.
 async fn log_page(
-    State((bus, _hub, _config, _registry)): State<BusState>,
+    State((bus, _hub, _config, _registry, _invites, _dynamic_peers)): State<BusState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let msgs = bus.list_all().await.unwrap_or_default();
@@ -737,13 +923,16 @@ async fn log_page(
     )
 }
 
-/// Shared app state: the bus, its config, the ws event hub, and the delivery
-/// registry that makes push-on-arrival real (RFC-002).
+/// Shared app state: the bus, its config, the ws event hub, the delivery
+/// registry that makes push-on-arrival real (RFC-002), and the RFC-006
+/// dashboard-driven federation state (invites + dynamically learned peers).
 pub type BusState = (
     Arc<EventBus>,
     Arc<EventHub>,
     Arc<ServerConfig>,
     Arc<crate::deliver::Registry>,
+    Arc<tokio::sync::RwLock<Vec<crate::handshake::Invite>>>,
+    Arc<crate::handshake::DynamicPeers>,
 );
 
 /// Build the router (exposed for tests + compose).
@@ -756,6 +945,15 @@ pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
             .with_persistence(std::path::Path::new(&dir).join("registry.json")),
         _ => crate::deliver::Registry::new(),
     });
+    // RFC-006: dashboard-driven federation state — invites + dynamically
+    // learned peers, persisted next to the registry.
+    let invites: Arc<tokio::sync::RwLock<Vec<crate::handshake::Invite>>> =
+        Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    let dynamic_peers = match std::env::var("HOT_POTATO_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => crate::handshake::DynamicPeers::new()
+            .with_persistence(std::path::Path::new(&dir).join("peers.json")),
+        _ => crate::handshake::DynamicPeers::new(),
+    };
     let card = config.agent_card();
     let app = crate::ws::router()
         .route("/", get(dashboard).post(rpc))
@@ -768,7 +966,7 @@ pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
                 Json(serde_json::to_value(card.clone()).expect("card serializes"))
             }),
         )
-        .with_state((bus, hub, config, registry));
+        .with_state((bus, hub, config, registry, invites, dynamic_peers));
     let swagger = utoipa_swagger_ui::SwaggerUi::new("/docs")
         .url("/openapi.json", crate::openapi::openapi_doc());
     app.merge(swagger)

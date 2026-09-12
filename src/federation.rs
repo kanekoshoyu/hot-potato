@@ -95,6 +95,10 @@ impl Peers {
         self.0.len()
     }
 
+    pub fn all(&self) -> Vec<Peer> {
+        (*self.0).clone()
+    }
+
     /// Which pool is home for this agent? `None` = treat as local.
     pub fn resolve(&self, agent: &str) -> Option<Peer> {
         self.0.iter().find(|p| p.contains(agent)).cloned()

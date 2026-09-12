@@ -17,6 +17,7 @@ pub mod bus;
 pub mod deliver;
 pub mod error;
 pub mod federation;
+pub mod handshake;
 pub mod message;
 pub mod openapi;
 pub mod server;
