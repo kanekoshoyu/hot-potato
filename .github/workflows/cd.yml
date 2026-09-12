@@ -1,8 +1,17 @@
 name: CD
 
 # Auto-deploy after CI passes on main.
-# - fleet pool: Coolify API rebuild (this box's Coolify)
-# - prod pool: Coolify API rebuild (Anastasia's Coolify) — needs secrets to be set
+# - fleet pool: Coolify API rebuild (this box's Coolify, coolify-agent.daometric.com:8000)
+# - prod pool: Coolify API rebuild (Anastasia's Coolify, coolify.daometric.com)
+#
+# Secrets (all set 2026-09-12):
+#   COOLIFY_URL            fleet Coolify base URL
+#   COOLIFY_PAT            fleet Coolify API token (patricia-api, id 5)
+#   COOLIFY_FLEET_APP_UUID hot-potato app uuid in fleet pool
+#   COOLIFY_PROD_WEBHOOK   full deploy URL incl. ?uuid=...&force=true
+#   COOLIFY_PROD_TOKEN     prod deploy-scoped API token (anastasia personal_access_tokens
+#                          id=13 "ci-prod-deploy"; deploy ability ONLY — version/services
+#                          endpoints 403. Revoke anytime via anastasia.)
 
 on:
   workflow_run:
@@ -17,6 +26,10 @@ jobs:
     steps:
       - name: Trigger Coolify rebuild (fleet pool)
         run: |
+          if [ -z "${{ secrets.COOLIFY_URL }}" ] || [ -z "${{ secrets.COOLIFY_PAT }}" ]; then
+            echo "::warning::fleet Coolify secrets not set — skipping fleet deploy"
+            exit 0
+          fi
           curl -sS -f -X POST \
             "${{ secrets.COOLIFY_URL }}/api/v1/deploy" \
             -H "Authorization: Bearer ${{ secrets.COOLIFY_PAT }}" \
@@ -32,8 +45,10 @@ jobs:
       - name: Trigger Coolify rebuild (prod pool)
         run: |
           if [ -z "${{ secrets.COOLIFY_PROD_WEBHOOK }}" ]; then
-            echo "COOLIFY_PROD_WEBHOOK not set — prod deploys manually for now"
+            echo "::warning::COOLIFY_PROD_WEBHOOK not set — prod deploys manually for now"
             exit 0
           fi
-          curl -sS -f -X POST "${{ secrets.COOLIFY_PROD_WEBHOOK }}"
+          curl -sS -f -X POST "${{ secrets.COOLIFY_PROD_WEBHOOK }}" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_PROD_TOKEN }}" \
+            -H "Content-Type: application/json"
           echo "prod deploy triggered"
