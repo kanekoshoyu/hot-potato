@@ -21,13 +21,16 @@ use crate::bus::EventBus;
 use crate::message::Message;
 use crate::store::memory::InMemoryStore;
 
-/// Shared state tuple for the ws router. The 4th slot mirrors BusState's
-/// registry (unused here, kept so one state tuple flows through both routers).
+/// Shared state tuple for the ws router. Slots 4-6 mirror BusState's registry
+/// + RFC-006 federation state (unused here, kept so one state tuple flows
+/// through both routers).
 pub type WsState = (
     Arc<EventBus>,
     Arc<EventHub>,
     Arc<crate::server::ServerConfig>,
     Arc<crate::deliver::Registry>,
+    Arc<tokio::sync::RwLock<Vec<crate::handshake::Invite>>>,
+    Arc<crate::handshake::DynamicPeers>,
 );
 
 /// One lifecycle event, as seen by observers.
@@ -81,7 +84,7 @@ impl Default for EventHub {
 
 /// GET /ws — upgrade and stream events. First frame = hello+stats snapshot.
 async fn ws_handler(
-    State((bus, hub, config, _registry)): State<WsState>,
+    State((bus, hub, config, _registry, _invites, _dynamic_peers)): State<WsState>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
     upgrade.on_upgrade(move |socket| stream(bus, hub, config, socket))
