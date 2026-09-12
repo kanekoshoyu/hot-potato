@@ -131,7 +131,7 @@ async fn discover() -> Value {
             {"name":"message/ack","params":["agent","id","note (<=80 chars)"],"desc":"file the result; idempotent on already-acked; accepts delivered or read"},
             {"name":"agent/status","params":["agent"],"desc":"lifecycle of everything this agent SENT"},
             {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
-            {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)"],"desc":"OBSERVER: every letter on the bus, any status, read-only (v0.2)"},
+            {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)","max_age_secs (optional: only letters newer than N seconds)","max_hops (optional: only letters with hops <= N, 0=local pool)","sender / receiver (optional: exact agent name)"],"desc":"OBSERVER: every letter on the bus, any status, read-only, adjustable filters (v0.3.6)"},
             {"name":"agent/list","params":[],"desc":"registry dump with team tags (dashboard legend) (RFC-005)"},
             {"name":"peer/invite","params":[],"desc":"generate a one-time invite code (dashboard: Invite a peer) (RFC-006)"},
             {"name":"peer/join","params":["code","url","name","agents[]"],"desc":"join a remote pool with an invite code (dashboard: Join a peer); three-way handshake completes automatically (RFC-006)"},
@@ -592,6 +592,14 @@ async fn rpc(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
+            // Adjustable filters (dashboard/API query — hotels.com style):
+            // max_age_secs: only letters created within the last N seconds
+            // max_hops:     only letters with hops <= N (0 = local pool only)
+            // sender / receiver: exact agent name match
+            let max_age_secs = req.params.get("max_age_secs").and_then(|v| v.as_i64());
+            let max_hops = req.params.get("max_hops").and_then(|v| v.as_u64());
+            let sender_f = req.params.get("sender").and_then(|v| v.as_str()).map(str::to_string);
+            let receiver_f = req.params.get("receiver").and_then(|v| v.as_str()).map(str::to_string);
             bus.list_all()
                 .await
                 .map(|mut msgs| {
@@ -599,6 +607,21 @@ async fn rpc(
                         msgs.retain(|m| {
                             format!("{:?}", m.status).to_lowercase() == s.to_lowercase()
                         });
+                    }
+                    if let Some(age) = max_age_secs {
+                        let now = chrono::Utc::now();
+                        msgs.retain(|m| {
+                            (now - m.created_at).num_seconds() <= age
+                        });
+                    }
+                    if let Some(h) = max_hops {
+                        msgs.retain(|m| (m.hops as u64) <= h);
+                    }
+                    if let Some(s) = &sender_f {
+                        msgs.retain(|m| &m.sender == s);
+                    }
+                    if let Some(r) = &receiver_f {
+                        msgs.retain(|m| &m.receiver == r);
                     }
                     fifo_last(&mut msgs, limit);
                     json!(msgs)
