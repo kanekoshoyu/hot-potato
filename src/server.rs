@@ -43,6 +43,10 @@ pub struct ServerConfig {
     pub public_url: String,
     pub version: String,
     pub bearer_token: Option<String>,
+    /// Dashboard login (separate from the bus token — browsers never see the
+    /// bus token). Default admin/88888888, override via env in production.
+    pub dashboard_user: String,
+    pub dashboard_password: String,
     /// RFC-004: federation peers (remote pools + the agents they are home to).
     pub peers: crate::federation::Peers,
     /// RFC-004: this pool's own name (goes into `forwarded_from`).
@@ -60,6 +64,10 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "http://localhost:8080".into()),
             version: env!("CARGO_PKG_VERSION").to_string(),
             bearer_token: std::env::var("HOT_POTATO_TOKEN").ok(),
+            dashboard_user: std::env::var("HOT_POTATO_DASHBOARD_USER")
+                .unwrap_or_else(|_| "admin".into()),
+            dashboard_password: std::env::var("HOT_POTATO_DASHBOARD_PASSWORD")
+                .unwrap_or_else(|_| "88888888".into()),
             peers: crate::federation::Peers::from_env(),
             pool_name: std::env::var("HOT_POTATO_POOL").unwrap_or_else(|_| "local".into()),
         }
@@ -144,18 +152,48 @@ async fn discover() -> Value {
 }
 
 /// JSON-RPC handler — the single endpoint agents talk to.
+///
+/// Auth (either passes the gate):
+/// - agents: `Authorization: Bearer <HOT_POTATO_TOKEN>` (when the pool has one)
+/// - dashboard: `X-Dashboard-Session: <sid>` from `dashboard/login` (v0.3.9)
 async fn rpc(
-    State((bus, hub, config, registry, invites, dynamic_peers)): State<BusState>,
+    State((bus, hub, config, registry, invites, dynamic_peers, sessions)): State<BusState>,
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
+    // dashboard/login must pass WITHOUT any credential — it IS the credential
+    // exchange. Validate user/pass, mint a session, never reach the bus.
+    if req.method == "dashboard/login" {
+        let user = req.params.get("username").and_then(|v| v.as_str()).unwrap_or("");
+        let pass = req.params.get("password").and_then(|v| v.as_str()).unwrap_or("");
+        if user == config.dashboard_user && pass == config.dashboard_password {
+            let sid = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().simple().to_string();
+            sessions.write().await.insert(sid.clone());
+            return (
+                StatusCode::OK,
+                Json(json!({"jsonrpc":"2.0","id":req.id,"result":{"session":sid}})),
+            );
+        }
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32002,"message":"invalid credentials"}})),
+        );
+    }
+
+    let mut session_ok = false;
+    if let Some(sid) = headers
+        .get("x-dashboard-session")
+        .and_then(|v| v.to_str().ok())
+    {
+        session_ok = sessions.read().await.contains(sid);
+    }
     if let Some(expected) = &config.bearer_token {
-        let ok = headers
+        let bearer_ok = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .map(|v| v == format!("Bearer {expected}"))
             .unwrap_or(false);
-        if !ok {
+        if !bearer_ok && !session_ok {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(
@@ -956,7 +994,7 @@ async fn dashboard() -> impl IntoResponse {
 /// GET /log?limit=N — human-readable lifecycle page (RFC-001 F2).
 /// The chatlog view: every letter on the bus, newest last, one line each.
 async fn log_page(
-    State((bus, _hub, _config, _registry, _invites, _dynamic_peers)): State<BusState>,
+    State((bus, _hub, _config, _registry, _invites, _dynamic_peers, _sessions)): State<BusState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let msgs = bus.list_all().await.unwrap_or_default();
@@ -996,8 +1034,9 @@ async fn log_page(
 }
 
 /// Shared app state: the bus, its config, the ws event hub, the delivery
-/// registry that makes push-on-arrival real (RFC-002), and the RFC-006
-/// dashboard-driven federation state (invites + dynamically learned peers).
+/// registry that makes push-on-arrival real (RFC-002), the RFC-006
+/// dashboard-driven federation state (invites + dynamically learned peers),
+/// and the dashboard login sessions (v0.3.9).
 pub type BusState = (
     Arc<EventBus>,
     Arc<EventHub>,
@@ -1005,10 +1044,15 @@ pub type BusState = (
     Arc<crate::deliver::Registry>,
     Arc<tokio::sync::RwLock<Vec<crate::handshake::Invite>>>,
     Arc<crate::handshake::DynamicPeers>,
+    Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 );
 
 /// Build the router (exposed for tests + compose).
-pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
+pub fn router(
+    bus: Arc<EventBus>,
+    config: Arc<ServerConfig>,
+    sessions: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+) -> Router {
     let hub = Arc::new(EventHub::new());
     // Registry persistence: survive restarts. The registry file lives next to
     // the sled data dir (HOT_POTATO_DATA_DIR) when set — no dir, no file.
@@ -1038,7 +1082,7 @@ pub fn router(bus: Arc<EventBus>, config: Arc<ServerConfig>) -> Router {
                 Json(serde_json::to_value(card.clone()).expect("card serializes"))
             }),
         )
-        .with_state((bus, hub, config, registry, invites, dynamic_peers));
+        .with_state((bus, hub, config, registry, invites, dynamic_peers, sessions));
     let swagger = utoipa_swagger_ui::SwaggerUi::new("/docs")
         .url("/openapi.json", crate::openapi::openapi_doc());
     app.merge(swagger)
@@ -1050,7 +1094,9 @@ pub async fn serve(
     config: Arc<ServerConfig>,
     addr: &str,
 ) -> std::io::Result<()> {
-    let app = router(bus, config);
+    let sessions: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+    let app = router(bus, config, sessions);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }
@@ -1062,6 +1108,10 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt; // oneshot
+
+    fn test_sessions() -> Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> {
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()))
+    }
 
     async fn test_bus() -> Arc<EventBus> {
         let bus = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
@@ -1078,10 +1128,12 @@ mod tests {
             public_url: "http://test".into(),
             version: "0.1.0".into(),
             bearer_token: None,
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers: crate::federation::Peers::default(),
             pool_name: "test".into(),
         });
-        router(bus, cfg)
+        router(bus, cfg, test_sessions())
     }
 
     async fn rpc_call(app: Router, method: &str, params: Value) -> Value {
@@ -1274,10 +1326,12 @@ mod tests {
             public_url: "u".into(),
             version: "0".into(),
             bearer_token: Some("secret".into()),
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers: crate::federation::Peers::default(),
             pool_name: "t".into(),
         });
-        let a = router(bus, cfg);
+        let a = router(bus, cfg, test_sessions());
         let body = json!({"jsonrpc":"2.0","id":1,"method":"bus/archive","params":{}});
         let res = a
             .oneshot(
@@ -1292,7 +1346,53 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // --- RFC-004: bus federation -------------------------------------------
+    #[tokio::test]
+    async fn dashboard_login_mints_session_and_session_passes_gate() {
+        let bus = test_bus().await;
+        let cfg = Arc::new(ServerConfig {
+            name: "t".into(),
+            description: "d".into(),
+            public_url: "u".into(),
+            version: "0".into(),
+            bearer_token: Some("secret".into()),
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
+            peers: crate::federation::Peers::default(),
+            pool_name: "t".into(),
+        });
+        let sessions = test_sessions();
+        let a = router(bus, cfg, sessions.clone());
+        // wrong password -> 401
+        let bad = json!({"jsonrpc":"2.0","id":1,"method":"dashboard/login",
+            "params":{"username":"admin","password":"nope"}});
+        let res = a.clone().oneshot(
+            Request::post("/").header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&bad).unwrap())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        // right password -> session
+        let good = json!({"jsonrpc":"2.0","id":1,"method":"dashboard/login",
+            "params":{"username":"admin","password":"88888888"}});
+        let res = a.clone().oneshot(
+            Request::post("/").header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&good).unwrap())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let sid: String = serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["session"]
+            .as_str().unwrap().into();
+        assert!(!sid.is_empty());
+        // session header passes the token gate
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"agent/list","params":{}});
+        let res = a.oneshot(
+            Request::post("/").header("x-dashboard-session", &sid)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // --- RFC-004: bus federation ------------------------------------------- //
 
     /// A bus app that routes `diana` to a fake peer at 127.0.0.1:1
     /// (connection refused — deterministic "peer down").
@@ -1308,10 +1408,12 @@ mod tests {
             public_url: "u".into(),
             version: "0".into(),
             bearer_token: None,
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers,
             pool_name: "sho".into(),
         });
-        router(bus, cfg)
+        router(bus, cfg, test_sessions())
     }
 
     #[tokio::test]
@@ -1356,10 +1458,12 @@ mod tests {
             public_url: "u".into(),
             version: "0".into(),
             bearer_token: Some("poolsecret".into()),
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers,
             pool_name: "sho".into(),
         });
-        let a = router(bus.clone(), cfg);
+        let a = router(bus.clone(), cfg, test_sessions());
 
         let body = json!({"jsonrpc":"2.0","id":1,"method":"message/send",
             "params":{"sender":"patricia","receiver":"victoria","type":"task",
@@ -1434,10 +1538,12 @@ mod tests {
             public_url: "u".into(),
             version: "0".into(),
             bearer_token: Some("poolsecret".into()),
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers: crate::federation::Peers::default(),
             pool_name: "sho".into(),
         });
-        let a = router(bus, cfg);
+        let a = router(bus, cfg, test_sessions());
         let body = json!({"jsonrpc":"2.0","id":1,"method":"message/send",
             "params":{"sender":"patricia","receiver":"victoria","type":"task",
                       "subject":"loop","body":"b","hops":9,"forwarded_from":"fleet"}});
@@ -1479,6 +1585,8 @@ mod tests {
             public_url: format!("http://{addr_b}"),
             version: "0".into(),
             bearer_token: Some("shared-secret".into()),
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers: crate::federation::Peers::default(),
             pool_name: "fleet".into(),
         });
@@ -1496,16 +1604,18 @@ mod tests {
             public_url: format!("http://{addr_a}"),
             version: "0".into(),
             bearer_token: Some("shared-secret".into()),
+            dashboard_user: "admin".into(),
+            dashboard_password: "88888888".into(),
             peers: peers_a,
             pool_name: "sho".into(),
         });
 
         tokio::spawn(async move {
-            axum::serve(l_a, router(bus_a, cfg_a)).await.unwrap();
+            axum::serve(l_a, router(bus_a, cfg_a, test_sessions())).await.unwrap();
         });
         let bus_b2 = bus_b.clone();
         tokio::spawn(async move {
-            axum::serve(l_b, router(bus_b2, cfg_b)).await.unwrap();
+            axum::serve(l_b, router(bus_b2, cfg_b, test_sessions())).await.unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 

@@ -181,16 +181,17 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const now = () => new Date().toTimeString().slice(0, 8);
 
 const RPC = (location.origin.includes(':8000') ? location.origin.replace(':8000', ':8082') : location.origin) + '/';
-// Auth: pools with HOT_POTATO_TOKEN set gate RPC (Bearer) and /ws (?t=).
-// A login modal collects username+password once; the password IS the bus token.
-// Stored in localStorage; 'logout' link in header clears it.
-let TOKEN = localStorage.getItem('hp_token') || '';
-let AUTH_HEADERS = TOKEN ? {'Authorization': 'Bearer ' + TOKEN} : {};
-const WS_URL = () => (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (TOKEN ? '?t=' + encodeURIComponent(TOKEN) : '');
-function applyToken(t) {
-  TOKEN = t;
-  AUTH_HEADERS = t ? {'Authorization': 'Bearer ' + t} : {};
-  if (t) localStorage.setItem('hp_token', t); else localStorage.removeItem('hp_token');
+// Auth (v0.3.9): dashboard/login exchanges username+password (server env:
+// HOT_POTATO_DASHBOARD_USER / HOT_POTATO_DASHBOARD_PASSWORD, default
+// admin/88888888) for a session id. All RPC carries X-Dashboard-Session;
+// /ws rides ?s=. The bus token NEVER reaches the browser.
+let SESSION = sessionStorage.getItem('hp_session') || '';
+let AUTH_HEADERS = SESSION ? {'X-Dashboard-Session': SESSION} : {};
+const WS_URL = () => (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (SESSION ? '?s=' + encodeURIComponent(SESSION) : '');
+function applySession(s) {
+  SESSION = s;
+  AUTH_HEADERS = s ? {'X-Dashboard-Session': s} : {};
+  if (s) sessionStorage.setItem('hp_session', s); else sessionStorage.removeItem('hp_session');
 }
 function showLogin(msg) {
   let ov = document.getElementById('login-overlay');
@@ -199,23 +200,32 @@ function showLogin(msg) {
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(13,17,23,.92);display:flex;align-items:center;justify-content:center;z-index:999;';
     ov.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:28px;width:min(340px,90vw);font-family:inherit">
       <h2 style="font-size:16px;margin-bottom:4px">🥔 Sign in</h2>
-      <p id="login-msg" style="font-size:12px;color:var(--dim);margin-bottom:14px">This bus requires a password.</p>
+      <p id="login-msg" style="font-size:12px;color:var(--dim);margin-bottom:14px">This bus requires a login.</p>
       <label style="font-size:11px;color:var(--dim)">USERNAME</label>
-      <input id="login-user" autocomplete="username" style="display:block;width:100%;box-sizing:border-box;margin:4px 0 12px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      <input id="login-user" value="admin" autocomplete="username" style="display:block;width:100%;box-sizing:border-box;margin:4px 0 12px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       <label style="font-size:11px;color:var(--dim)">PASSWORD</label>
       <input id="login-pass" type="password" autocomplete="current-password" style="display:block;width:100%;box-sizing:border-box;margin:4px 0 14px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       <button id="login-go" style="width:100%;padding:9px;background:var(--blue);border:none;border-radius:6px;color:#0d1117;font-weight:700;cursor:pointer">Sign in</button>
     </div>`;
     document.body.appendChild(ov);
-    const go = () => {
-      const pw = document.getElementById('login-pass').value;
-      if (!pw) return;
-      applyToken(pw);
-      document.querySelector('header .conn').insertAdjacentHTML('beforeend',
-        ' · <a href="#" onclick="logout();return false" style="color:var(--dim);font-size:11px">logout</a>');
-      ov.remove();
-      connect();
-      loadSnapshot();
+    const go = async () => {
+      const u = document.getElementById('login-user').value;
+      const p = document.getElementById('login-pass').value;
+      if (!p) return;
+      try {
+        const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({jsonrpc:'2.0', id:1, method:'dashboard/login', params:{username:u, password:p}}) });
+        const d = await r.json();
+        if (d.result && d.result.session) {
+          applySession(d.result.session);
+          document.querySelector('header .conn').insertAdjacentHTML('beforeend',
+            ' · <a href="#" onclick="logout();return false" style="color:var(--dim);font-size:11px">logout</a>');
+          ov.remove();
+          connect(); loadSnapshot();
+        } else {
+          ov.querySelector('#login-msg').textContent = 'Wrong username or password.';
+        }
+      } catch { ov.querySelector('#login-msg').textContent = 'Login failed — try again.'; }
     };
     ov.querySelector('#login-go').onclick = go;
     ov.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
@@ -223,7 +233,7 @@ function showLogin(msg) {
   }
   if (msg) ov.querySelector('#login-msg').textContent = msg;
 }
-function logout() { applyToken(''); showLogin(); location.reload(); }
+function logout() { applySession(''); location.reload(); }
 
 const letters = {};
 const agents = new Set();
@@ -666,14 +676,14 @@ restoreFilterUI();
 })();
 // header logout chip
 document.querySelector('header .conn').insertAdjacentHTML('beforeend',
-  TOKEN ? ' · <a href="#" onclick="logout();return false" style="color:var(--dim);font-size:11px">logout</a>' : '');
-// gate: no saved token -> show login first; RPC also re-prompts on 401.
+  SESSION ? ' · <a href="#" onclick="logout();return false" style="color:var(--dim);font-size:11px">logout</a>' : '');
+// gate: no valid session -> show login first.
 (async () => {
-  if (!TOKEN) { showLogin(); return; }
+  if (!SESSION) { showLogin(); return; }
   try {
     const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json', ...AUTH_HEADERS},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'agent/list', params:{}}) });
-    if (r.status === 401) { applyToken(''); showLogin('Session expired — sign in again.'); return; }
+    if (r.status === 401) { applySession(''); showLogin('Session expired — sign in again.'); return; }
   } catch {}
   loadSnapshot().then(connect);
 })();
