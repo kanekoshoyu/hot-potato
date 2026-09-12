@@ -22,9 +22,9 @@ use crate::bus::EventBus;
 use crate::message::Message;
 use crate::store::memory::InMemoryStore;
 
-/// Shared state tuple for the ws router. Slots 4-6 mirror BusState's registry
-/// + RFC-006 federation state (unused here, kept so one state tuple flows
-/// through both routers).
+/// Shared state tuple for the ws router. Slots 4-7 mirror BusState's registry
+/// + RFC-006 federation state + v0.3.9 dashboard sessions (unused here, kept
+/// so one state tuple flows through both routers).
 pub type WsState = (
     Arc<EventBus>,
     Arc<EventHub>,
@@ -32,6 +32,7 @@ pub type WsState = (
     Arc<crate::deliver::Registry>,
     Arc<tokio::sync::RwLock<Vec<crate::handshake::Invite>>>,
     Arc<crate::handshake::DynamicPeers>,
+    Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 );
 
 /// One lifecycle event, as seen by observers.
@@ -85,18 +86,25 @@ impl Default for EventHub {
 
 /// GET /ws — upgrade and stream events. First frame = hello+stats snapshot.
 ///
-/// Auth: when the pool has HOT_POTATO_TOKEN set, a browser WebSocket cannot
-/// send an Authorization header, so the dashboard passes the token as a
-/// `?t=` query parameter (same shared secret, transport = the TLS layer).
+/// Auth (either): `?t=<bus token>` or `?s=<dashboard session>` — a browser
+/// WebSocket cannot send headers, so both ride the query string.
 async fn ws_handler(
-    State((bus, hub, config, _registry, _invites, _dynamic_peers)): State<WsState>,
+    State((bus, hub, config, _registry, _invites, _dynamic_peers, sessions)): State<WsState>,
     Query(q): Query<std::collections::HashMap<String, String>>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
-    if let Some(expected) = &config.bearer_token {
-        if q.get("t").map(String::as_str) != Some(expected.as_str()) {
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
+    let token_ok = config
+        .bearer_token
+        .as_ref()
+        .map(|expected| q.get("t").map(String::as_str) == Some(expected.as_str()))
+        .unwrap_or(false);
+    let session_ok = match q.get("s") {
+        Some(sid) => sessions.read().await.contains(sid),
+        None => false,
+    };
+    let locked = config.bearer_token.is_some();
+    if locked && !token_ok && !session_ok {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
     upgrade.on_upgrade(move |socket| stream(bus, hub, config, socket))
 }
