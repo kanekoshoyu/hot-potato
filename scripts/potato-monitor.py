@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 
 import websocket  # websocket-client
 
-BUS_WS = "ws://localhost:8080/ws"
-BUS_HTTP = "http://localhost:8080"
+BUS_WS = "wss://potato.daometric.com/ws"   # via Traefik since bus move (2026-09-12)
+BUS_HTTP = "https://potato.daometric.com"
 TG_CHAT_ID = "5690144164"
 STATE_PATH = "/tmp/potato-monitor-state.json"
 PID_PATH = "/tmp/potato-monitor.pid"
@@ -44,9 +44,12 @@ def log(msg):
 
 def tg(text):
     token = None
-    for line in open(os.path.expanduser("~/.hermes/.env")):
-        if line.startswith("MONITOR_BOT_TOKEN="):
-            token = line.strip().split("=", 1)[1]
+    for key in ("MONITOR_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"):  # fallback: main bot
+        for line in open(os.path.expanduser("~/.hermes/.env")):
+            if line.startswith(key + "="):
+                token = line.strip().split("=", 1)[1]
+                break
+        if token:
             break
     if not token:
         log("MONITOR_BOT_TOKEN missing — cannot send")
@@ -93,10 +96,20 @@ def fmt(m):
     return f"{line1}\n{line2}" + (f"\n{line3}" if line3 else "")
 
 
+def _bus_token():
+    for line in open(os.path.expanduser("~/.hermes/.env")):
+        if line.startswith("HOT_POTATO_TOKEN="):
+            return line.strip().split("=", 1)[1]
+    return None
+
+BUS_TOKEN = _bus_token()
+
 def bus(payload):
+    headers = {"Content-Type": "application/json"}
+    if BUS_TOKEN:
+        headers["Authorization"] = f"Bearer {BUS_TOKEN}"
     req = urllib.request.Request(
-        f"{BUS_HTTP}/", data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"})
+        f"{BUS_HTTP}/", data=json.dumps(payload).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
@@ -203,7 +216,9 @@ def main():
     threading.Thread(target=watchdog, daemon=True).start()
     while True:
         try:
-            ws = websocket.create_connection(BUS_WS, timeout=10)
+            ws = websocket.create_connection(
+                BUS_WS, timeout=10,
+                header=[f"Authorization: Bearer {BUS_TOKEN}"] if BUS_TOKEN else None)
             ws.settimeout(30)
             log("connected to /ws")
             while True:

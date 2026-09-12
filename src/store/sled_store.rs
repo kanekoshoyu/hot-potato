@@ -177,6 +177,44 @@ impl BusStore for SledStore {
         self.collect(|m| m.status == MessageStatus::Acked).await
     }
 
+    async fn delete_one(&self, id: &str) -> BusResult<Message> {
+        // Ids are unique bus-wide, but the key embeds the receiver — scan
+        // everything for the matching id and remove it.
+        let mut found: Option<(Vec<u8>, Message)> = None;
+        for item in self.db.iter() {
+            let (k, v) = item.map_err(sled_err)?;
+            if let Ok(m) = serde_json::from_slice::<Message>(&v) {
+                if m.id == id {
+                    found = Some((k.to_vec(), m));
+                    break;
+                }
+            }
+        }
+        let (key, msg) = found.ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        self.db.remove(&key).map_err(sled_err)?;
+        Ok(msg)
+    }
+
+    async fn delete_all(&self) -> BusResult<u64> {
+        let mut removed: u64 = 0;
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for item in self.db.iter() {
+            let (k, v) = item.map_err(sled_err)?;
+            // skip agent markers — they are registry state, not letters
+            if k.starts_with(b"__agent__::") {
+                continue;
+            }
+            if serde_json::from_slice::<Message>(&v).is_ok() {
+                keys.push(k.to_vec());
+            }
+        }
+        for k in &keys {
+            self.db.remove(k).map_err(sled_err)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     async fn list_all(&self) -> BusResult<Vec<Message>> {
         self.collect(|_| true).await
     }

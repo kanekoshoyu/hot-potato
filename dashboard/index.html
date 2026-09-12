@@ -50,6 +50,10 @@
   .evt .arrow { color: var(--dim); }
   .evt .subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 100%; order: 10; }
   @media (min-width: 700px) { .evt .subj { flex: 1 1 auto; order: 0; } }
+  .del-btn { background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 4px;
+             cursor: pointer; font-size: 10px; padding: 1px 6px; margin-left: auto; order: 20; }
+  .del-btn:hover { color: #f85149; border-color: #f85149; background: rgba(248,81,73,.08); }
+  h2 .del-btn { margin-left: 12px; font-size: 11px; padding: 3px 10px; }
   .pill { font-size: 10px; padding: 1px 7px; border-radius: 9px; font-family: var(--mono); flex-shrink: 0; }
   .pill.queued { background: #33290033; color: var(--yellow); border: 1px solid var(--yellow); }
   .pill.delivered { background: #58a6ff22; color: var(--blue); border: 1px solid var(--blue); }
@@ -163,7 +167,7 @@
       <div id="drillPanel" style="display:none; max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch"></div>
     </div>
     <div class="panel">
-      <h2>Live feed <span id="feedCount"></span></h2>
+      <h2>Live feed <span id="feedCount"></span> <button class="del-btn del-all" title="delete every potato" onclick="deleteAllLetters()">🗑 delete all</button></h2>
       <div class="feed" id="feed"><div class="evt"><span class="t">--:--:--</span><span class="subj">connecting to /ws …</span></div></div>
     </div>
   </div>
@@ -242,10 +246,31 @@ function feedLine(evt, l) {
     <span class="id" title="${esc(l.id)}" onclick="inspect('${esc(l.id)}')">${esc(l.id.slice(0,8))}</span>
     <span>${esc(l.sender)}</span><span class="arrow">→</span><span>${esc(l.receiver)}</span>
     <span class="pill ${evt}">${evt}</span>
-    <span class="subj">${esc(l.subject || '')}</span>`;
+    <span class="subj">${esc(l.subject || '')}</span>
+    <button class="del-btn" title="delete this potato" onclick="deleteLetter('${esc(l.id)}')">✕</button>`;
   feed.prepend(el);
   while (feed.children.length > 300) feed.lastChild.remove();
 }
+
+window.deleteLetter = async function(id) {
+  if (!confirm('Delete potato ' + id.slice(0,8) + '? This cannot be undone.')) return;
+  try {
+    await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/delete', params:{ id }}) });
+    delete letters[id];
+    document.querySelectorAll(`[title="${id}"]`).forEach(e => e.parentElement?.remove());
+    refreshStats(); renderGraph();
+  } catch (e) { console.warn('delete failed', e); }
+};
+
+window.deleteAllLetters = async function() {
+  if (!confirm('DELETE EVERY potato on this bus? This cannot be undone.')) return;
+  try {
+    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/delete_all', params:{} }) });
+    await loadSnapshot();
+  } catch (e) { console.warn('delete_all failed', e); }
+};
 
 window.inspect = function(id) {
   const l = letters[id];

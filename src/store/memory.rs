@@ -187,6 +187,26 @@ impl BusStore for InMemoryStore {
         Ok(out)
     }
 
+    async fn delete_one(&self, id: &str) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        for (_, msgs) in inner.mailboxes.iter_mut() {
+            if let Some(pos) = msgs.iter().position(|m| m.id == id) {
+                return Ok(msgs.remove(pos));
+            }
+        }
+        Err(BusError::NotFound(id.to_string()))
+    }
+
+    async fn delete_all(&self) -> BusResult<u64> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let mut removed: u64 = 0;
+        for (_, msgs) in inner.mailboxes.iter_mut() {
+            removed += msgs.len() as u64;
+            msgs.clear();
+        }
+        Ok(removed)
+    }
+
     async fn list_all(&self) -> BusResult<Vec<Message>> {
         let inner = self.inner.read().expect("store poisoned");
         let mut out: Vec<Message> = inner.mailboxes.values().flatten().cloned().collect();

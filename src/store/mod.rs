@@ -48,6 +48,14 @@ pub trait BusStore: Send + Sync {
     /// Everything ever acked — the audit log.
     async fn archive(&self) -> BusResult<Vec<Message>>;
 
+    /// Delete exactly one letter by id (any status). Returns the removed
+    /// letter (Sho, 2026-09-13: selective cleanup — v0.3.8).
+    async fn delete_one(&self, id: &str) -> BusResult<Message>;
+
+    /// Delete every letter in the bus, any status. Returns how many were
+    /// removed (Sho, 2026-09-13: full cleanup — v0.3.8).
+    async fn delete_all(&self) -> BusResult<u64>;
+
     /// Every letter in the bus, any status. Read-only observer view
     /// (`message/list`, `/log`, WebSocket stats). Never mutates state.
     async fn list_all(&self) -> BusResult<Vec<Message>>;

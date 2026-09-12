@@ -163,6 +163,16 @@ impl EventBus {
         self.store.archive().await
     }
 
+    /// Delete one letter by id, any status (Sho 2026-09-13, v0.3.8).
+    pub async fn delete_letter(&self, id: &str) -> BusResult<Message> {
+        self.store.delete_one(id).await
+    }
+
+    /// Delete every letter, any status (Sho 2026-09-13, v0.3.8).
+    pub async fn delete_all_letters(&self) -> BusResult<u64> {
+        self.store.delete_all().await
+    }
+
     /// Observer view: every letter on the bus, any status. Read-only.
     pub async fn list_all(&self) -> BusResult<Vec<Message>> {
         self.store.list_all().await
@@ -322,5 +332,30 @@ mod tests {
         b.poll("diana", 0).await.unwrap();
         b.ack("diana", &id, "done").await.unwrap();
         assert_eq!(b.archive().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_one_removes_exactly_that_letter() {
+        let b = bus().await;
+        let keep = b.send("patricia", "diana", MsgType::Task, "keep", "b", None).await.unwrap();
+        let kill = b.send("patricia", "diana", MsgType::Task, "kill", "b", None).await.unwrap();
+        b.delete_letter(&kill).await.unwrap();
+        assert!(b.delete_letter(&kill).await.is_err()); // gone — second delete 404s
+        let listed = b.list_all().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, keep);
+    }
+
+    #[tokio::test]
+    async fn delete_all_clears_every_status() {
+        let b = bus().await;
+        b.send("patricia", "diana", MsgType::Task, "queued", "b", None).await.unwrap();
+        let did = b.send("patricia", "diana", MsgType::Task, "delivered", "b", None).await.unwrap();
+        b.poll("diana", 0).await.unwrap();
+        b.ack("diana", &did, "done").await.unwrap();
+        let n = b.delete_all_letters().await.unwrap();
+        assert_eq!(n, 2); // queued + acked both go
+        assert!(b.list_all().await.unwrap().is_empty());
+        assert!(b.archive().await.unwrap().is_empty()); // audit log gone too — destructive by design
     }
 }
