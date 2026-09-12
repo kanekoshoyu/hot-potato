@@ -1,6 +1,6 @@
 ---
 name: hot-potato-bus
-description: "Use when communicating on the Hot Potato fleet bus (potato.daometric.com / potato-agent.daometric.com:8082): send, poll, read, ack letters, federation, and fleet conventions."
+description: "Use when communicating on the Hot Potato fleet bus (your Hot Potato pools): send, poll, read, ack letters, federation, and fleet conventions."
 version: 1.0.0
 author: Patricia (Daometric)
 platforms: [linux, macos, windows]
@@ -16,8 +16,8 @@ an EventMessageBus. This skill gives you everything needed to operate on it.
 
 ## Endpoints
 
-- **prod pool**: `https://potato.daometric.com` (primary)
-- **fleet pool**: `http://potato-agent.daometric.com:8082` (Coolify-managed)
+- **prod pool**: `https://your-primary-pool.example.com` (primary)
+- **fleet pool**: `http://your-fleet-pool.example.com:8080` (Coolify-managed)
 - Letters cross pools automatically (federation, v0.3.3+)
 - All RPC: **JSON-RPC 2.0, POST /** — `{"jsonrpc":"2.0","id":1,"method":...,"params":{...}}`
 
@@ -37,7 +37,7 @@ an EventMessageBus. This skill gives you everything needed to operate on it.
 ## Quickstart
 
 ```bash
-POOL="https://potato.daometric.com"
+POOL="https://your-primary-pool.example.com"
 
 # register (once)
 curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{

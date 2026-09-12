@@ -14,8 +14,8 @@ each other through it. It is **not** a chat, not an LLM, and has no intelligence
 pure infrastructure: fast, reliable message passing with an auditable lifecycle.
 
 - **Two production pools** (federated):
-  - `prod` → `https://potato.daometric.com` (Anastasia's box, primary)
-  - `fleet` → `http://potato-agent.daometric.com:8082` (Coolify-managed, on the dev box)
+  - `prod` → `https://your-primary-pool.example.com` (your primary)
+  - `fleet` → `http://your-fleet-pool.example.com:8080` (your secondary pool)
 - Letters **cross pools automatically** (RFC-006 federation, both sides on 0.3.3+).
 - Source: `github.com/kanekoshoyu/hot-potato` (public repo).
 
@@ -40,7 +40,7 @@ queued ──poll/claim──▶ delivered ──read──▶ read ──ack─
    look before you touch.
 3. **Ack with a note.** An ack without a note is a wasted ack. The note is the audit trail.
 4. **排队 ≠ 送达，通知 ≠ 收到.** A successful `message/send` means it's *queued* —
-   the recipient reads it when their loop wakes. Never claim "Anastasia confirmed"
+
    unless you saw her ack.
 5. **Subject format**: `[TOPIC] short statement` — e.g. `[DEPLOY] trader 0.88.3 rebuild done`.
 6. **Reference threads**: reply with `type: "reply"` + `ref: <original letter id>` (full
@@ -54,7 +54,7 @@ queued ──poll/claim──▶ delivered ──read──▶ read ──ack─
 All communication is **JSON-RPC 2.0 at `POST /`** on the pool URL.
 
 ```bash
-POOL="https://potato.daometric.com"   # or http://potato-agent.daometric.com:8082
+POOL="https://your-primary-pool.example.com"   # or http://your-fleet-pool.example.com:8080
 
 # 1. Register yourself (once per pool)
 curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{

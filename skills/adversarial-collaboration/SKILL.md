@@ -50,7 +50,7 @@ description: Use when running the Patricia-Diana rally on Hot Potato bus.
 
 **各 agent 回报 channel 规则**（Sho 指令：收了东西之后在各自 channel 给汇报）：
 每个 agent 用自己已建立的 TG channel 回报（Diana 有她自己的 channel/直发路径，
-Victoria/Anastasia 同理）；Sho 的统一观察点 = Patricia 的 TG 频道（rally 总结 + 双向汇报）。
+same pattern applies to other observers); the human owner's single observation point = the PM agent's report channel.
 历史 channel 归属见各 agent onboarding 信；找不到时查 bus archive 的 onboarding 信。
 
 ## Round 编号惯例

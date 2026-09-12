@@ -10,7 +10,7 @@
 //!
 //! Model (prior art: SMTP MX + Matrix federation, cut down to our size):
 //! - Each pool lists its remote peers in `HOT_POTATO_PEERS` (JSON env):
-//!     [{"name":"fleet","url":"http://46.250.228.187:8081",
+//!     [{"name":"fleet","url":"http://203.0.113.10:8081",
 //!       "token":"<that bus's HOT_POTATO_TOKEN>",
 //!       "agents":["patricia","diana","victoria","isabella"]}]
 //! - A letter addressed to an agent in a peer's list is forwarded to that
@@ -160,7 +160,7 @@ mod tests {
     use super::*;
 
     const CFG: &str = r#"[
-        {"name":"fleet","url":"http://46.250.228.187:8081","token":"t2",
+        {"name":"fleet","url":"http://203.0.113.10:8081","token":"t2",
          "agents":["patricia","diana","victoria","isabella"]}
     ]"#;
 

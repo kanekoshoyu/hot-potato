@@ -1,8 +1,8 @@
 name: CD
 
 # Auto-deploy after CI passes on main.
-# - fleet pool: Coolify API rebuild (this box's Coolify, coolify-agent.daometric.com:8000)
-# - prod pool: Coolify API rebuild (Anastasia's Coolify, coolify.daometric.com)
+# - fleet pool: Coolify API rebuild (operator's Coolify instance)
+# - prod pool: Coolify API rebuild (second operator's Coolify instance)
 #
 # Secrets (all set 2026-09-12):
 #   COOLIFY_URL            fleet Coolify base URL
@@ -48,7 +48,16 @@ jobs:
             echo "::warning::COOLIFY_PROD_WEBHOOK not set — prod deploys manually for now"
             exit 0
           fi
-          curl -sS -f -X POST "${{ secrets.COOLIFY_PROD_WEBHOOK }}" \
+          set +e
+          RESP=$(curl -sS --max-time 30 -X POST "${{ secrets.COOLIFY_PROD_WEBHOOK }}" \
             -H "Authorization: Bearer ${{ secrets.COOLIFY_PROD_TOKEN }}" \
-            -H "Content-Type: application/json"
-          echo "prod deploy triggered"
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            -w '\nHTTP_STATUS:%{http_code}')
+          STATUS=$(echo "$RESP" | tail -1 | sed 's/HTTP_STATUS://')
+          echo "$RESP"
+          echo "prod deploy HTTP status: $STATUS"
+          case "$STATUS" in
+            200) echo "prod deploy triggered" ;;
+            *) echo "::error::prod deploy failed with HTTP $STATUS"; exit 1 ;;
+          esac
