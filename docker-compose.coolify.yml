@@ -1,11 +1,11 @@
-# Coolify-friendly compose: no host networking, published ports only.
+# Coolify compose: no host networking, no published ports —
+# the domain (https://potato-agent.daometric.com) is set in Coolify
+# (docker_compose_domains) and coolify-proxy (Traefik) routes 443 → container:8080.
 services:
   hot-potato:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8082:8080"
     restart: unless-stopped
     environment:
       HOT_POTATO_NAME: hot-potato
