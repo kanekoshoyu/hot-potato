@@ -266,7 +266,12 @@ window.inspect = function(id) {
 
 /* ---------- graph ---------- */
 
-function ageMs(l) { return Date.now() - new Date((l.created_at || 0).replace(' ', 'T') + 'Z').getTime(); }
+function parseTs(ts) {
+  if (!ts) return NaN;
+  if (/Z$|[+-]\d\d:\d\d$/.test(ts)) return new Date(ts).getTime(); // already ISO w/ tz
+  return new Date(ts.replace(' ', 'T') + 'Z').getTime();             // naive → UTC
+}
+function ageMs(l) { return Date.now() - parseTs(l.created_at); }
 
 function renderGraph() {
   const svg = $('graph');
@@ -284,6 +289,8 @@ function renderGraph() {
     pos[n] = [cx + R * Math.cos(a), cy + R * Math.sin(a)];
   });
 
+  const nodeR = isMobile ? 22 : 26;
+
   // ── RFC: per-pair interaction history, newest-first, capped at 3 ──
   const pairs = {};
   for (const l of Object.values(letters)) {
@@ -297,6 +304,10 @@ function renderGraph() {
     pairs[k] = pairs[k].slice(0, 3);
   }
 
+  let svgStr = `<defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker>
+    <marker id="arrHot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ffd54d"/></marker>
+  </defs>`;
   // Broadcast edges (to 'all'): draw as faint dashed rays from sender, no arrowhead, no pair history
   const bcast = Object.values(letters).filter(l => (l.receiver||'').toLowerCase() === 'all');
   const bSenders = [...new Set(bcast.map(l => l.sender))].filter(s => pos[s]);
@@ -310,10 +321,6 @@ function renderGraph() {
     svgStr += `<text x="${x2}" y="${y2 + 4}" fill="#8b949e" font-size="${isMobile ? 9 : 10}" font-family="monospace" text-anchor="middle">broadcast</text>`;
   });
 
-  let svgStr = `<defs>
-    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker>
-    <marker id="arrHot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ffd54d"/></marker>
-  </defs>`;
 
   for (const [k, ls] of Object.entries(pairs)) {
     const [s, r] = k.split('|');
@@ -344,7 +351,6 @@ function renderGraph() {
     });
   }
 
-  const nodeR = isMobile ? 22 : 26;
   names.forEach((n) => {
     const [x, y] = pos[n];
     const isHuman = n === 'sho';
@@ -380,8 +386,8 @@ window.agentStats = function(n) {
   const mine = all.filter(l => l.sender === n || l.receiver === n)
     .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')).slice(0, 5);
   const fmtDur = l => {
-    const a = new Date(l.created_at||0).getTime();
-    const b = new Date(l.acked_at || l.read_at || l.delivered_at || Date.now()).getTime();
+    const a = parseTs(l.created_at);
+    const b = l.acked_at || l.read_at || l.delivered_at ? parseTs(l.acked_at || l.read_at || l.delivered_at) : Date.now();
     return isNaN(a) || isNaN(b) ? '—' : Math.max(0, Math.round((b-a)/1000)) + 's';
   };
   const dir = l => l.sender === n ? `→ ${l.receiver}` : `← ${l.sender}`;
@@ -492,8 +498,10 @@ function renderPotatoes() {
   });
   const nowMs = Date.now();
   const fmtAgo = ts => {
-    const s = Math.max(0, Math.round((nowMs - new Date((ts||'').replace(' ','T')+'Z').getTime())/1000));
-    return s < 60 ? s + 's' : s < 3600 ? Math.round(s/60) + 'm' : Math.round(s/3600) + 'h';
+    const t = parseTs(ts);
+    if (isNaN(t)) return '—';
+    const sec = Math.max(0, Math.round((nowMs - t)/1000));
+    return sec < 60 ? sec + 's' : sec < 3600 ? Math.round(sec/60) + 'm' : Math.round(sec/3600) + 'h';
   };
   const sorted = Object.entries(threads)
     .sort((a,b) => (b[1][0].created_at||'').localeCompare(a[1][0].created_at||''))
