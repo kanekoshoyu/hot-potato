@@ -1,0 +1,39 @@
+name: CD
+
+# Auto-deploy after CI passes on main.
+# - fleet pool: Coolify API rebuild (this box's Coolify)
+# - prod pool: Coolify API rebuild (Anastasia's Coolify) — needs secrets to be set
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy-fleet:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Trigger Coolify rebuild (fleet pool)
+        run: |
+          curl -sS -f -X POST \
+            "${{ secrets.COOLIFY_URL }}/api/v1/deploy" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_PAT }}" \
+            -H "Content-Type: application/json" \
+            -d '{"uuid": "${{ secrets.COOLIFY_FLEET_APP_UUID }}", "force": true}'
+          echo "fleet deploy triggered"
+
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: deploy-fleet
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Trigger Coolify rebuild (prod pool)
+        run: |
+          if [ -z "${{ secrets.COOLIFY_PROD_WEBHOOK }}" ]; then
+            echo "COOLIFY_PROD_WEBHOOK not set — prod deploys manually for now"
+            exit 0
+          fi
+          curl -sS -f -X POST "${{ secrets.COOLIFY_PROD_WEBHOOK }}"
+          echo "prod deploy triggered"

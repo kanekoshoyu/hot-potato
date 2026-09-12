@@ -103,7 +103,7 @@
     </div>
     <div class="panel">
       <h2>Letter inspector <span id="inspId"></span></h2>
-      <div class="inspector" id="inspector">Tap any letter id in the feed to inspect its full lifecycle.</div>
+      <div class="inspector" id="inspector">Tap a letter id in the feed — or tap a node in the graph — to see stats.</div>
     </div>
   </div>
 
@@ -291,7 +291,7 @@ function renderGraph() {
     const c = teamColor(n, i);
     const inflight = Object.values(letters).filter(l => l.receiver === n && l.status === 'queued').length;
     const waiting = Object.values(letters).filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
-    svgStr += `<g class="node ${(inflight + waiting) > 0 ? 'hot' : ''}">
+    svgStr += `<g class="node ${(inflight + waiting) > 0 ? 'hot' : ''}" onclick="agentStats('${esc(n)}')" style="cursor:pointer">
       <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${c}"/>
       <text x="${x}" y="${y + 4}">${esc(n.slice(0, 9))}</text>
       <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : 'idle'}</text>
@@ -299,6 +299,34 @@ function renderGraph() {
   });
   svg.innerHTML = svgStr;
 }
+
+/* ---------- per-agent in/out stats (tap a node) ---------- */
+window.agentStats = function(n) {
+  const all = Object.values(letters);
+  const state = s => s === 'delivered' ? 'delivered/read' : s;
+  // IN: letters where I am receiver
+  const inn = all.filter(l => l.receiver === n);
+  const inQ  = inn.filter(l => l.status === 'queued').length;                 // arrived, not yet processed
+  const inP  = inn.filter(l => l.status === 'delivered' || l.status === 'read').length; // processing
+  const inD  = inn.filter(l => l.status === 'acked').length;                  // done
+  // OUT: letters where I am sender
+  const out = all.filter(l => l.sender === n);
+  const outQ = out.filter(l => l.status === 'queued').length;                 // sent, no reply yet
+  const outW = out.filter(l => l.status === 'delivered' || l.status === 'read').length; // other side processing
+  const outD = out.filter(l => l.status === 'acked').length;                  // confirmed done
+  $('inspId').textContent = n.slice(0, 12) + ' · stats';
+  $('inspector').innerHTML =
+    `<b>📥 IN</b>   total ${inn.length}\n` +
+    `   new (未处理)      ${inQ}\n` +
+    `   processing (处理中) ${inP}\n` +
+    `   acked (完成)       ${inD}\n` +
+    `<b>📤 OUT</b>  total ${out.length}\n` +
+    `   sent (等回复)      ${outQ}\n` +
+    `   peer processing    ${outW}\n` +
+    `   acked (对方确认)    ${outD}\n` +
+    `<span style="color:#58a6ff">▶ 刚到/刚发 · ⏳ 处理中 · ✓=acked 完成</span>`;
+  if (window.innerWidth < 700) $('inspector').scrollIntoView({behavior:'smooth', block:'nearest'});
+};
 
 /* ---------- data boot ---------- */
 async function loadSnapshot() {
