@@ -129,6 +129,8 @@ async fn discover() -> Value {
             {"name":"message/peek","params":["agent"],"desc":"look without marking (queued letters only)"},
             {"name":"message/read","params":["agent","id"],"desc":"chatlog read receipt; requires delivered state"},
             {"name":"message/ack","params":["agent","id","note (<=80 chars)"],"desc":"file the result; idempotent on already-acked; accepts delivered or read"},
+            {"name":"message/delete","params":["id"],"desc":"delete one letter by id, any status (destructive, v0.3.8)"},
+            {"name":"message/delete_all","params":[],"desc":"delete EVERY letter on the bus, any status (destructive, v0.3.8)"},
             {"name":"agent/status","params":["agent"],"desc":"lifecycle of everything this agent SENT"},
             {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
             {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)","max_age_secs (optional: only letters newer than N seconds)","max_hops (optional: only letters with hops <= N, 0=local pool)","sender / receiver (optional: exact agent name)"],"desc":"OBSERVER: every letter on the bus, any status, read-only, adjustable filters (v0.3.6)"},
@@ -580,6 +582,26 @@ async fn rpc(
             .archive()
             .await
             .map(|m| json!(m))
+            .map_err(|e| e.to_string()),
+        "message/delete" => {
+            parse1(&req.params, "id", |id| {
+                let id = id.to_string();
+                async move {
+                    bus.delete_letter(&id)
+                        .await
+                        .map(|m| {
+                            hub.emit("deleted", &m);
+                            json!(m)
+                        })
+                        .map_err(|e| e.to_string())
+                }
+            })
+            .await
+        }
+        "message/delete_all" => bus
+            .delete_all_letters()
+            .await
+            .map(|n| json!({ "deleted": n }))
             .map_err(|e| e.to_string()),
         "message/list" => {
             let status = req
