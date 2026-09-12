@@ -261,7 +261,9 @@ function renderGraph() {
     const cls = queued > 0 ? 'edge active' : hot ? 'edge warm' : 'edge done';
     // recency → opacity: newest of the kept = 1.0, then 0.65, 0.4
     const opac = [1, .65, .4];
-    // one line per recent interaction (max 3), fanning slightly so they don't overlap
+    // one line per recent interaction (max 3), fanning slightly so they don't overlap.
+    // NO text chips — the direction arrowhead on the line itself shows who → whom;
+    // tap either endpoint node for per-agent stats + per-letter timing.
     ls.forEach((l, i) => {
       const fan = (i - (ls.length - 1) / 2) * 14; // px offset per interaction
       const dx = (y2 - y1), dy = (x1 - x2);
@@ -270,18 +272,6 @@ function renderGraph() {
       const ageOp = opac[Math.min(i, 2)];
       const line = `${cls}${i === 0 ? '' : ' older'}`.trim();
       svgStr += `<path class="${line}" d="M${x1},${y1} Q${mx},${my} ${x2},${y2}" fill="none" marker-end="url(#arr)" opacity="${ageOp}"/>`;
-      // arrow-style annotation: single compact chip on the NEWEST interaction only
-      if (i === 0) {
-        const queuedN = ls.filter(x => x.status === 'queued').length;
-        const waitingN = ls.filter(x => x.status === 'delivered' || x.status === 'read').length;
-        const stateTxt = queuedN > 0 ? `${queuedN}▶` : waitingN > 0 ? `${waitingN}⏳` : '✓';
-        const chip = `${esc(s.slice(0,4))}→${esc(r.slice(0,4))} ${ls.length} ${stateTxt}`;
-        const fs = window.innerWidth < 700 ? 9 : 10;
-        const w = chip.length * fs * 0.62 + 10;
-        svgStr += `<g opacity="${ageOp}">` +
-          `<rect x="${mx - w/2}" y="${my - 9}" width="${w}" height="15" rx="7" fill="#0d1117ee" stroke="${queuedN > 0 ? '#d29922' : '#30363d'}" stroke-width="1"/>` +
-          `<text x="${mx}" y="${my + 2}" fill="${queuedN > 0 ? '#d29922' : hot ? '#58a6ff' : '#8b949e'}" font-size="${fs}" text-anchor="middle" font-family="monospace">${chip}</text></g>`;
-      }
     });
   }
 
@@ -303,7 +293,6 @@ function renderGraph() {
 /* ---------- per-agent in/out stats (tap a node) ---------- */
 window.agentStats = function(n) {
   const all = Object.values(letters);
-  const state = s => s === 'delivered' ? 'delivered/read' : s;
   // IN: letters where I am receiver
   const inn = all.filter(l => l.receiver === n);
   const inQ  = inn.filter(l => l.status === 'queued').length;                 // arrived, not yet processed
@@ -314,6 +303,15 @@ window.agentStats = function(n) {
   const outQ = out.filter(l => l.status === 'queued').length;                 // sent, no reply yet
   const outW = out.filter(l => l.status === 'delivered' || l.status === 'read').length; // other side processing
   const outD = out.filter(l => l.status === 'acked').length;                  // confirmed done
+  // per-letter timing for the 5 most recent letters touching this agent
+  const mine = all.filter(l => l.sender === n || l.receiver === n)
+    .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')).slice(0, 5);
+  const fmtDur = l => {
+    const a = new Date(l.created_at||0).getTime();
+    const b = new Date(l.acked_at || l.read_at || l.delivered_at || Date.now()).getTime();
+    return isNaN(a) || isNaN(b) ? '—' : Math.max(0, Math.round((b-a)/1000)) + 's';
+  };
+  const dir = l => l.sender === n ? `→ ${l.receiver}` : `← ${l.sender}`;
   $('inspId').textContent = n.slice(0, 12) + ' · stats';
   $('inspector').innerHTML =
     `<b>📥 IN</b>   total ${inn.length}\n` +
@@ -324,7 +322,10 @@ window.agentStats = function(n) {
     `   sent (等回复)      ${outQ}\n` +
     `   peer processing    ${outW}\n` +
     `   acked (对方确认)    ${outD}\n` +
-    `<span style="color:#58a6ff">▶ 刚到/刚发 · ⏳ 处理中 · ✓=acked 完成</span>`;
+    `<b>recent letters</b> (耗时 = 到当前状态所用时间)\n` +
+    mine.map(l =>
+      ` ${dir(l)}  [${esc(l.status)}] ${fmtDur(l)} — ${esc((l.subject||'').slice(0,36))}`
+    ).join('\n');
   if (window.innerWidth < 700) $('inspector').scrollIntoView({behavior:'smooth', block:'nearest'});
 };
 
