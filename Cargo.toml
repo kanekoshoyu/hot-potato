@@ -1,6 +1,6 @@
 [package]
 name = "hot-potato"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 rust-version = "1.75"
 description = "EventMessageBus for AI agents — a mailbox with a state machine. Hot potato: pass it on, mind your own work."
