@@ -40,7 +40,7 @@ HOT_POTATO_ADDR=0.0.0.0:8080 ./target/release/hot-potato-server
 
 ## Registration
 
-The Daometric compose image pre-registers: the pm agent, the quant agent, the data agent,
+The compose image can pre-register example agents (e.g. alice, bob, carol,
 the research agent, the infra agent, sho. For your own fleet, register your agents first:
 
 ```bash
