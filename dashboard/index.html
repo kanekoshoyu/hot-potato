@@ -181,8 +181,49 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const now = () => new Date().toTimeString().slice(0, 8);
 
 const RPC = (location.origin.includes(':8000') ? location.origin.replace(':8000', ':8082') : location.origin) + '/';
-const nobust = () => '_cb=' + Date.now();
-const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+// Auth: pools with HOT_POTATO_TOKEN set gate RPC (Bearer) and /ws (?t=).
+// A login modal collects username+password once; the password IS the bus token.
+// Stored in localStorage; 'logout' link in header clears it.
+let TOKEN = localStorage.getItem('hp_token') || '';
+let AUTH_HEADERS = TOKEN ? {'Authorization': 'Bearer ' + TOKEN} : {};
+const WS_URL = () => (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (TOKEN ? '?t=' + encodeURIComponent(TOKEN) : '');
+function applyToken(t) {
+  TOKEN = t;
+  AUTH_HEADERS = t ? {'Authorization': 'Bearer ' + t} : {};
+  if (t) localStorage.setItem('hp_token', t); else localStorage.removeItem('hp_token');
+}
+function showLogin(msg) {
+  let ov = document.getElementById('login-overlay');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'login-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(13,17,23,.92);display:flex;align-items:center;justify-content:center;z-index:999;';
+    ov.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:28px;width:min(340px,90vw);font-family:inherit">
+      <h2 style="font-size:16px;margin-bottom:4px">🥔 Sign in</h2>
+      <p id="login-msg" style="font-size:12px;color:var(--dim);margin-bottom:14px">This bus requires a password.</p>
+      <label style="font-size:11px;color:var(--dim)">USERNAME</label>
+      <input id="login-user" autocomplete="username" style="display:block;width:100%;box-sizing:border-box;margin:4px 0 12px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      <label style="font-size:11px;color:var(--dim)">PASSWORD</label>
+      <input id="login-pass" type="password" autocomplete="current-password" style="display:block;width:100%;box-sizing:border-box;margin:4px 0 14px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      <button id="login-go" style="width:100%;padding:9px;background:var(--blue);border:none;border-radius:6px;color:#0d1117;font-weight:700;cursor:pointer">Sign in</button>
+    </div>`;
+    document.body.appendChild(ov);
+    const go = () => {
+      const pw = document.getElementById('login-pass').value;
+      if (!pw) return;
+      applyToken(pw);
+      document.querySelector('header .conn').insertAdjacentHTML('beforeend',
+        ' · <a href="#" onclick="logout();return false" style="color:var(--dim);font-size:11px">logout</a>');
+      ov.remove();
+      connect();
+      loadSnapshot();
+    };
+    ov.querySelector('#login-go').onclick = go;
+    ov.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+    ov.querySelector('#login-user').focus();
+  }
+  if (msg) ov.querySelector('#login-msg').textContent = msg;
+}
+function logout() { applyToken(''); showLogin(); location.reload(); }
 
 const letters = {};
 const agents = new Set();
@@ -196,7 +237,7 @@ function teamOf(n) { return tags[n]?.team || ''; }
 
 async function loadTags() {
   try {
-    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
+    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json', ...AUTH_HEADERS},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'agent/list', params:{}}) });
     const d = await r.json();
     tags = {};
@@ -255,7 +296,7 @@ function feedLine(evt, l) {
 window.deleteLetter = async function(id) {
   if (!confirm('Delete potato ' + id.slice(0,8) + '? This cannot be undone.')) return;
   try {
-    await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
+    await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json', ...AUTH_HEADERS},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/delete', params:{ id }}) });
     delete letters[id];
     document.querySelectorAll(`[title="${id}"]`).forEach(e => e.parentElement?.remove());
@@ -266,7 +307,7 @@ window.deleteLetter = async function(id) {
 window.deleteAllLetters = async function() {
   if (!confirm('DELETE EVERY potato on this bus? This cannot be undone.')) return;
   try {
-    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
+    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json', ...AUTH_HEADERS},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/delete_all', params:{} }) });
     await loadSnapshot();
   } catch (e) { console.warn('delete_all failed', e); }
@@ -495,7 +536,7 @@ function restoreFilterUI() {
 async function loadSnapshot() {
   try {
     await loadTags();
-    const r = await fetch(RPC, { method: 'POST', headers: {'Content-Type':'application/json'},
+    const r = await fetch(RPC, { method: 'POST', headers: {'Content-Type':'application/json', ...AUTH_HEADERS},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/list', params: {...filters}}) });
     const d = await r.json();
     (d.result || []).forEach(l => { upsertLetter(l); });
@@ -507,7 +548,7 @@ async function loadSnapshot() {
 }
 
 function connect() {
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(WS_URL());
   ws.onopen = () => { $('dot').classList.add('live'); $('connTxt').textContent = 'live'; };
   ws.onmessage = ev => {
     let d; try { d = JSON.parse(ev.data); } catch { return; }
@@ -528,6 +569,7 @@ function connect() {
   };
   ws.onerror = () => ws.close();
 }
+let TOKEN_NOTE_SHOWN = false;
 
 setInterval(() => { renderGraph(); updateTriCount(); if (drillMode === 'pair') renderPairDrill(drillPair); else if (drillMode === 'agent') agentStats(drillAgent); }, 4000);
 window.addEventListener('resize', renderGraph);
@@ -622,7 +664,19 @@ restoreFilterUI();
     $('verChip').textContent = 'v' + v.version + ' · ' + v.built_at.slice(5,16).replace('T',' ');
   } catch { $('verChip').textContent = 'v?'; }
 })();
-loadSnapshot().then(connect);
+// header logout chip
+document.querySelector('header .conn').insertAdjacentHTML('beforeend',
+  TOKEN ? ' · <a href="#" onclick="logout();return false" style="color:var(--dim);font-size:11px">logout</a>' : '');
+// gate: no saved token -> show login first; RPC also re-prompts on 401.
+(async () => {
+  if (!TOKEN) { showLogin(); return; }
+  try {
+    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json', ...AUTH_HEADERS},
+      body: JSON.stringify({jsonrpc:'2.0', id:1, method:'agent/list', params:{}}) });
+    if (r.status === 401) { applyToken(''); showLogin('Session expired — sign in again.'); return; }
+  } catch {}
+  loadSnapshot().then(connect);
+})();
 </script>
 </body>
 </html>

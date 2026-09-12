@@ -8,7 +8,8 @@
 //! This is the engineering face of Sho's mailman principle: the bus pushes,
 //! observers don't poll.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -83,10 +84,20 @@ impl Default for EventHub {
 }
 
 /// GET /ws — upgrade and stream events. First frame = hello+stats snapshot.
+///
+/// Auth: when the pool has HOT_POTATO_TOKEN set, a browser WebSocket cannot
+/// send an Authorization header, so the dashboard passes the token as a
+/// `?t=` query parameter (same shared secret, transport = the TLS layer).
 async fn ws_handler(
     State((bus, hub, config, _registry, _invites, _dynamic_peers)): State<WsState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
+    if let Some(expected) = &config.bearer_token {
+        if q.get("t").map(String::as_str) != Some(expected.as_str()) {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
     upgrade.on_upgrade(move |socket| stream(bus, hub, config, socket))
 }
 
