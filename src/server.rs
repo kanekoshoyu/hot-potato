@@ -177,7 +177,10 @@ async fn rpc(
                             .unwrap_or("")
                             .to_string();
                         match s.as_str() {
-                            "a2a" => crate::deliver::DeliverVia::A2a { url },
+                            "a2a" => crate::deliver::DeliverVia::A2a {
+                                url,
+                                token: p.get("token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            },
                             "webhook" => crate::deliver::DeliverVia::Webhook { url },
                             _ => crate::deliver::DeliverVia::Relay { url },
                         }

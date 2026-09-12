@@ -19,7 +19,14 @@ use tokio::sync::RwLock;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DeliverVia {
     /// Push a notification to an A2A endpoint (SendMessage with the letter).
-    A2a { url: String },
+    /// `token` (0.3.4): optional bearer credential — sent as
+    /// `Authorization: Bearer <token>` on every push. Keeps the token OUT of
+    /// the per-request path; the registry is the single source of truth.
+    A2a {
+        url: String,
+        #[serde(default)]
+        token: Option<String>,
+    },
     /// POST the letter as JSON to a webhook.
     Webhook { url: String },
     /// Fire-and-forget door-knock via an HTTP relay (e.g. ntfy, TG relay).
@@ -213,7 +220,7 @@ impl PushTransport for HttpTransport {
                 .and_then(|r| r.error_for_status())
                 .map(|_| ())
                 .map_err(|e| format!("webhook push failed: {e}")),
-            DeliverVia::A2a { url } => {
+            DeliverVia::A2a { url, token } => {
                 // A2A v1.0 SendMessage is a SYNCHRONOUS task call — the peer
                 // gateway waits for its agent to fully process before replying.
                 // The bus is a notifier, not a task client: a timeout here means
@@ -232,13 +239,15 @@ impl PushTransport for HttpTransport {
                         }
                     }
                 });
-                match self
-                    .client
-                    .post(url)
-                    .json(&payload)
-                    .send()
-                    .await
-                {
+                // 0.3.4: attach the registered bearer credential, if any.
+                // Without it, token-gated gateways (e.g. Hermes a2a with
+                // HOT_POTATO/A2A auth on) 401 every push and the letter
+                // silently stays queued — the 2026-09-12 stress-test finding.
+                let mut req = self.client.post(url).json(&payload);
+                if let Some(tok) = token {
+                    req = req.bearer_auth(tok);
+                }
+                match req.send().await {
                     Ok(resp) => {
                         if resp.status().is_success() {
                             Ok(())
@@ -315,6 +324,7 @@ mod tests {
             "quant, data guardian",
             DeliverVia::A2a {
                 url: "http://localhost:8643/".into(),
+                token: None,
             },
         )
         .await;
@@ -365,7 +375,7 @@ mod tests {
             _letter: &serde_json::Value,
         ) -> Result<(), String> {
             let url = match target {
-                DeliverVia::A2a { url } => url.clone(),
+                DeliverVia::A2a { url, .. } => url.clone(),
                 DeliverVia::Webhook { url } => url.clone(),
                 DeliverVia::Relay { url } => url.clone(),
                 DeliverVia::Poll => return Err("poll-only".into()),
