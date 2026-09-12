@@ -1,0 +1,87 @@
+name: Fleet peers token attach
+
+# One-shot ops job (workflow_dispatch only): attach the peer pool's bearer
+# token to this repo's OTHER deployment (the "fleet" pool) so its outbound
+# cross-pool forwarding authenticates.
+#
+# Secret handling: the token exists ONLY inside the sealed Actions runner.
+#   - secret  HOT_POTATO_TOKEN       the peer pool's bearer
+#   - var     HOT_POTATO_PEERS_BASE  peers JSON WITHOUT tokens (name/url/agents)
+#   - var     FLEET_BUS_URL          fleet pool public URL, for post-deploy verify
+# No secrets, URLs or topology are hardcoded in this repository (hygiene rule).
+#
+# Idempotent: re-running refreshes the env value and redeploys.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upsert HOT_POTATO_PEERS env (fleet Coolify app)
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_PAT: ${{ secrets.COOLIFY_PAT }}
+          FLEET_UUID: ${{ secrets.COOLIFY_FLEET_APP_UUID }}
+          POOL_TOKEN: ${{ secrets.HOT_POTATO_TOKEN }}
+          PEERS_BASE: ${{ vars.HOT_POTATO_PEERS_BASE }}
+        run: |
+          set -euo pipefail
+          PEERS_JSON=$(jq -nc --arg tok "$POOL_TOKEN" \
+            '($PEERS_BASE | fromjson) | map(. + {token: $tok})')
+          BODY=$(jq -nc --arg val "$PEERS_JSON" \
+            '{key:"HOT_POTATO_PEERS", value:$val, is_build_time:false}')
+          AUTH="Authorization: Bearer $COOLIFY_PAT"
+          ENVS=$(curl -sS -f "$COOLIFY_URL/api/v1/applications/$FLEET_UUID/envs" -H "$AUTH")
+          EXISTING=$(echo "$ENVS" | jq -r \
+            '(.data // .) | if type=="array" then ((.[] | select(.key=="HOT_POTATO_PEERS") | .id) // "") else "" end' \
+            | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "HOT_POTATO_PEERS already present (id $EXISTING) — replacing"
+            curl -sS -f -X DELETE \
+              "$COOLIFY_URL/api/v1/applications/$FLEET_UUID/envs/$EXISTING" \
+              -H "$AUTH" > /dev/null
+          fi
+          curl -sS -f -X POST "$COOLIFY_URL/api/v1/applications/$FLEET_UUID/envs" \
+            -H "$AUTH" -H "Content-Type: application/json" \
+            -d "$BODY" > /dev/null
+          echo "HOT_POTATO_PEERS upserted (value sealed — not logged)"
+
+      - name: Redeploy fleet pool
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_PAT: ${{ secrets.COOLIFY_PAT }}
+          FLEET_UUID: ${{ secrets.COOLIFY_FLEET_APP_UUID }}
+        run: |
+          set -euo pipefail
+          curl -sS -f -X POST "$COOLIFY_URL/api/v1/deploy" \
+            -H "Authorization: Bearer $COOLIFY_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"uuid\":\"$FLEET_UUID\",\"force\":true}"
+          echo "fleet pool redeploy triggered"
+
+      - name: Wait for new build, verify peers auth flipped to bearer
+        env:
+          FLEET_BUS_URL: ${{ vars.FLEET_BUS_URL }}
+        run: |
+          set -euo pipefail
+          BASELINE=$(curl -sS -f "$FLEET_BUS_URL/version")
+          echo "baseline: $BASELINE"
+          for i in $(seq 1 24); do
+            sleep 20
+            CUR=$(curl -sS -f "$FLEET_BUS_URL/version" || echo '{}')
+            if [ "$CUR" != "$BASELINE" ]; then
+              echo "new build live: $CUR"
+              PEERS=$(curl -sS -f -X POST "$FLEET_BUS_URL/" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","id":1,"method":"peer/list","params":{}}')
+              echo "peer/list: $PEERS"
+              echo "$PEERS" | grep -q '"auth":"bearer"'
+              echo "OK: peer entry authenticates with bearer"
+              exit 0
+            fi
+            echo "waiting for rebuild... ($i)"
+          done
+          echo "::error::fleet pool did not roll a new build in time"
+          exit 1
