@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Hot Potato 🥔 — Live Dashboard</title>
 <style>
   :root {
@@ -10,22 +10,29 @@
     --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922;
     --blue: #58a6ff; --cyan: #39c5cf; --red: #f85149; --mono: 'SF Mono', 'Cascadia Code', Consolas, monospace;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
-  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid var(--border); }
-  header h1 { font-size: 18px; font-weight: 600; }
-  header h1 span { opacity: .8; }
-  .conn { font-family: var(--mono); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 20; }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header h1 span { opacity: .8; display: none; }
+  @media (min-width: 700px) { header h1 span { display: inline; } header h1 { font-size: 18px; } header { padding: 14px 24px; } }
+  .conn { font-family: var(--mono); font-size: 11px; display: flex; gap: 8px; align-items: center; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; }
   .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 24px; max-width: 1500px; margin: 0 auto; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 12px 16px 0; }
+  @media (min-width: 700px) { .stats-row { grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 16px 24px 0; max-width: 1500px; margin: 0 auto; } }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 6px; text-align: center; }
+  .stat .num { font-family: var(--mono); font-size: 18px; font-weight: 700; }
+  @media (min-width: 700px) { .stat .num { font-size: 26px; } .stat { padding: 12px 16px; text-align: left; } }
+  .stat .lbl { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+  @media (min-width: 700px) { .stat .lbl { font-size: 11px; } }
+  main { display: flex; flex-direction: column; gap: 16px; padding: 12px 16px 24px; }
+  @media (min-width: 700px) { main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 24px; max-width: 1500px; margin: 0 auto; } }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
   .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); padding: 10px 14px; border-bottom: 1px solid var(--border); display:flex; justify-content: space-between;}
-  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 16px 24px 0; max-width: 1500px; margin: 0 auto; }
-  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
-  .stat .num { font-family: var(--mono); font-size: 26px; font-weight: 700; }
-  .stat .lbl { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+  /* mobile tab order: graph first on small screens */
+  .panel.graph-panel { order: -1; }
+  @media (min-width: 700px) { .panel.graph-panel { order: 0; } }
   /* agent list */
   .agent { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid #21262d; cursor: default; }
   .agent:last-child { border-bottom: none; }
@@ -34,28 +41,39 @@
   .agent .sub { font-size: 11px; color: var(--dim); font-family: var(--mono); }
   .badge { margin-left: auto; font-size: 10px; font-family: var(--mono); padding: 2px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--dim); }
   /* feed */
-  .feed { max-height: 420px; overflow-y: auto; }
-  .evt { display: flex; gap: 10px; padding: 8px 14px; border-bottom: 1px solid #21262d; font-family: var(--mono); font-size: 12px; align-items: baseline; }
+  .feed { max-height: 46vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  @media (min-width: 700px) { .feed { max-height: 420px; } }
+  .evt { display: flex; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #21262d; font-family: var(--mono); font-size: 11px; align-items: baseline; flex-wrap: wrap; }
+  @media (min-width: 700px) { .evt { flex-wrap: nowrap; font-size: 12px; gap: 10px; padding: 8px 14px; } }
   .evt .t { color: var(--dim); flex-shrink: 0; }
   .evt .id { color: var(--cyan); cursor: pointer; }
   .evt .arrow { color: var(--dim); }
-  .evt .subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .evt .subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 100%; order: 10; }
+  @media (min-width: 700px) { .evt .subj { flex: 1 1 auto; order: 0; } }
   .pill { font-size: 10px; padding: 1px 7px; border-radius: 9px; font-family: var(--mono); flex-shrink: 0; }
   .pill.queued { background: #33290033; color: var(--yellow); border: 1px solid var(--yellow); }
   .pill.delivered { background: #58a6ff22; color: var(--blue); border: 1px solid var(--blue); }
   .pill.read { background: #39c5cf22; color: var(--cyan); border: 1px solid var(--cyan); }
   .pill.acked { background: #3fb95022; color: var(--green); border: 1px solid var(--green); }
-  /* graph */
-  .graph-wrap { position: relative; height: 460px; }
-  svg { width: 100%; height: 100%; }
-  .edge { stroke: #30363d; stroke-width: 1.5; }
-  .edge.active { stroke: var(--yellow); stroke-width: 2.5; }
-  .edge.warm { stroke: #d29922; stroke-width: 2; stroke-dasharray: 5 3; }
-  .edge.done { stroke: #21262d; stroke-width: 1; }
+  /* graph — mobile-first sizing */
+  .graph-wrap { position: relative; height: 78vw; max-height: 560px; min-height: 320px; }
+  @media (min-width: 700px) { .graph-wrap { height: 460px; } }
+  svg { width: 100%; height: 100%; touch-action: pan-y; }
+  .edge { stroke: #30363d; stroke-width: 1.5; fill: none; }
+  .edge.active { stroke-width: 2.5; }
+  .edge.warm { stroke-width: 2; }
+  .edge.done { stroke-width: 1; }
   .node circle { fill: var(--panel); stroke: var(--blue); stroke-width: 2; cursor: pointer; transition: r .2s; }
-  .node.hot circle { stroke: var(--yellow); filter: drop-shadow(0 0 6px var(--yellow)); }
+  .node.hot circle { filter: drop-shadow(0 0 6px var(--yellow)); }
   .node text { fill: var(--text); font-size: 12px; font-family: var(--mono); text-anchor: middle; }
   .node .cnt { fill: var(--dim); font-size: 10px; }
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 16px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .legend .li { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .sw { display: inline-block; width: 26px; height: 0; border-top: 2.5px solid; }
+  .legend .sw.solid { border-color: var(--yellow); }
+  .legend .sw.dashed { border-color: #d2992288; border-top-style: dashed; }
+  .legend .sw.faded { border-color: #21262d; }
   /* letter inspector */
   .inspector { font-family: var(--mono); font-size: 12px; padding: 12px 14px; white-space: pre-wrap; word-break: break-all; color: var(--dim); max-height: 300px; overflow-y: auto; }
   .inspector b { color: var(--text); }
@@ -70,11 +88,11 @@
 </header>
 
 <div class="stats-row">
-  <div class="stat"><div class="num" id="stAgents">–</div><div class="lbl">Agents connected</div></div>
-  <div class="stat"><div class="num" id="stLetters">–</div><div class="lbl">Total letters</div></div>
-  <div class="stat"><div class="num" id="stInflight">–</div><div class="lbl">In flight (queued)</div></div>
-  <div class="stat"><div class="num" id="stWaiting">–</div><div class="lbl">Waiting (delivered/read)</div></div>
-  <div class="stat"><div class="num" id="stToday">–</div><div class="lbl">Events today</div></div>
+  <div class="stat"><div class="num" id="stAgents">–</div><div class="lbl">Agents</div></div>
+  <div class="stat"><div class="num" id="stLetters">–</div><div class="lbl">Letters</div></div>
+  <div class="stat"><div class="num" id="stInflight">–</div><div class="lbl">In flight</div></div>
+  <div class="stat"><div class="num" id="stWaiting">–</div><div class="lbl">Waiting</div></div>
+  <div class="stat"><div class="num" id="stToday">–</div><div class="lbl">Today</div></div>
 </div>
 
 <main>
@@ -85,13 +103,19 @@
     </div>
     <div class="panel">
       <h2>Letter inspector <span id="inspId"></span></h2>
-      <div class="inspector" id="inspector">Click any letter id in the feed to inspect its full lifecycle.</div>
+      <div class="inspector" id="inspector">Tap any letter id in the feed to inspect its full lifecycle.</div>
     </div>
   </div>
 
   <div style="display:flex; flex-direction:column; gap:16px;">
-    <div class="panel">
-      <h2>Agent graph <span style="text-transform:none">— who passes to whom</span></h2>
+    <div class="panel graph-panel">
+      <h2>Agent graph <span style="text-transform:none">— recent activity</span></h2>
+      <div class="legend">
+        <span class="li"><span class="sw solid"></span>in flight (queued)</span>
+        <span class="li"><span class="sw dashed"></span>waiting on reply</span>
+        <span class="li"><span class="sw faded"></span>done / idle</span>
+        <span class="li" style="color:var(--dim)">brightness = recency (newest brightest · max 3 shown)</span>
+      </div>
       <div class="graph-wrap"><svg id="graph"></svg></div>
     </div>
     <div class="panel">
@@ -101,114 +125,45 @@
   </div>
 </main>
 
-<footer>
-  Hot Potato — a mailbox with a state machine ·
-  <a href="#" onclick="openFederation();return false">federation</a> ·
-  <a href="/openapi.json">openapi</a> · <a href="/log">chatlog</a> · <a href="/health">health</a> ·
-  built by <a href="https://github.com/kanekoshoyu/hot-potato">Daometric Agents</a>
-</footer>
-
-<div id="fedModal" style="display:none;position:fixed;inset:0;background:#000c;z-index:99;align-items:center;justify-content:center">
-  <div style="background:var(--panel);border:1px solid #30363d;border-radius:10px;padding:22px;max-width:520px;width:92%;font-family:var(--mono);font-size:12px">
-    <h2 style="margin:0 0 12px;color:var(--text)">🥔 Federation</h2>
-    <div style="color:var(--dim);margin-bottom:8px">Connect two pools peer-to-peer. No config files: invite → join → automatic three-way handshake.</div>
-    <button onclick="doInvite()" style="background:var(--blue);color:#000;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer">Invite a peer</button>
-    <div id="inviteOut" style="margin:10px 0;color:var(--yellow);word-break:break-all"></div>
-    <hr style="border-color:#30363d;margin:14px 0">
-    <div style="color:var(--dim);margin-bottom:6px">Paste an invite code from the other pool:</div>
-    <input id="joinCode" placeholder="hp-xxxx…" style="width:100%;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
-    <input id="joinUrl" placeholder="your url as reachable by them, e.g. http://host:8082/" style="width:100%;margin-top:6px;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
-    <input id="joinName" placeholder="this pool's name, e.g. fleet" style="width:100%;margin-top:6px;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
-    <input id="joinAgents" placeholder="local agents, comma separated" style="width:100%;margin-top:6px;background:#0d1117;color:var(--text);border:1px solid #30363d;border-radius:6px;padding:8px;font-family:var(--mono)" />
-    <button onclick="doJoin()" style="margin-top:10px;background:#238636;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer">Join peer</button>
-    <div id="joinOut" style="margin-top:10px;color:var(--blue);word-break:break-all"></div>
-    <div id="peersOut" style="margin-top:12px;color:var(--dim)"></div>
-    <div style="text-align:right;margin-top:10px"><a href="#" onclick="document.getElementById('fedModal').style.display='none';return false" style="color:var(--dim)">close</a></div>
-  </div>
-</div>
-<script>
-async function openFederation(){
-  document.getElementById('fedModal').style.display='flex';
-  try{
-    const r=await rpcCall('peer/list',{});
-    document.getElementById('peersOut').textContent='peers: '+(r.result||[]).map(p=>p.name+'('+(p.agents||[]).length+' agents, '+p.auth+')').join(', ')||'none yet';
-  }catch(e){}
-}
-async function rpcCall(method,params){
-  const r=await fetch(RPC,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
-  const d=await r.json();
-  if(d.error) throw new Error(d.error.message||'rpc error');
-  return d;
-}
-async function doInvite(){
-  try{
-    const d=await rpcCall('peer/invite',{});
-    document.getElementById('inviteOut').textContent='code: '+d.result.code+' (valid 10 min)';
-  }catch(e){document.getElementById('inviteOut').textContent='error: '+e.message}
-}
-async function doJoin(){
-  const agents=document.getElementById('joinAgents').value.split(',').map(s=>s.trim()).filter(Boolean);
-  try{
-    const d=await rpcCall('peer/join',{
-      code:document.getElementById('joinCode').value.trim(),
-      url:document.getElementById('joinUrl').value.trim(),
-      name:document.getElementById('joinName').value.trim(),
-      agents});
-    document.getElementById('joinOut').textContent=JSON.stringify(d.result);
-  }catch(e){document.getElementById('joinOut').textContent='error: '+e.message}
-}
-</script>
+<footer>Hot Potato 🥔 · <a href="https://github.com/kanekoshoyu/hot-potato">kanekoshoyu/hot-potato</a> · letters are queued → delivered → read → acked</footer>
 
 <script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const now = () => new Date().toTimeString().slice(0, 8);
+
+const RPC = (location.origin.includes(':8000') ? location.origin.replace(':8000', ':8082') : location.origin) + '/';
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-const RPC = location.origin + '/';
-const STATUS_ORDER = { queued: 0, delivered: 1, read: 2, acked: 3 };
-const AGENT_COLORS = ['#58a6ff','#3fb950','#d29922','#39c5cf','#bc8cff','#f85149','#ff7b72','#7ee787'];
-const TEAM_COLORS = {};   // team tag -> color, assigned on first sight
-let agentTags = {};       // agent name -> [tags] (from agent/list)
 
-// RFC-005: color by team tag (first tag wins); untagged agents get the old per-name cycle.
-function teamOf(name) { const t = agentTags[name]; return t && t.length ? t[0] : null; }
-function teamColor(name, indexInList) {
-  const t = teamOf(name);
-  if (!t) return AGENT_COLORS[indexInList % AGENT_COLORS.length];
-  if (!(t in TEAM_COLORS)) TEAM_COLORS[t] = AGENT_COLORS[Object.keys(TEAM_COLORS).length % AGENT_COLORS.length];
-  return TEAM_COLORS[t];
-}
+const letters = {};
+const agents = new Set();
+let tags = {};
+let feedCount = 0;
+let hotUntil = 0;
+
+const PALETTE = ['#58a6ff', '#3fb950', '#d29922', '#39c5cf', '#bc8cff', '#f85149', '#ffa657', '#79c0ff'];
+function teamColor(n, i) { return tags[n]?.color || PALETTE[i % PALETTE.length]; }
+function teamOf(n) { return tags[n]?.team || ''; }
+
 async function loadTags() {
   try {
-    const r = await fetch(RPC, { method: 'POST', headers: {'Content-Type':'application/json'},
+    const r = await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'agent/list', params:{}}) });
     const d = await r.json();
-    (d.result || []).forEach(e => { agentTags[e.agent] = e.tags || []; });
-  } catch (e) { /* tags are cosmetic; never block the dashboard */ }
+    tags = {};
+    for (const a of (d.result || [])) tags[a.agent] = { team: (a.tags||[])[0] || '', color: PALETTE[(a.agent||'').length % PALETTE.length] };
+  } catch {}
 }
-
-let letters = {};      // id -> letter
-let agents = new Set();
-let feedCount = 0;
-let ws = null;
-
-const $ = id => document.getElementById(id);
-
-function now() { return new Date().toTimeString().slice(0, 8); }
-function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
 
 function upsertLetter(l) {
-  if (!l || !l.id) return;
-  const prev = letters[l.id];
-  letters[l.id] = Object.assign(prev || {}, l);
+  letters[l.id] = Object.assign(letters[l.id] || {}, l);
   agents.add(l.sender); agents.add(l.receiver);
 }
-
-function bumpStat(id) { const el = $(id); el.textContent = (parseInt(el.textContent)||0) + 1; }
 
 function refreshStats() {
   const all = Object.values(letters);
   $('stAgents').textContent = agents.size;
   $('stLetters').textContent = all.length;
-  // in flight = still in the bus's hands; delivered/read = waiting on receiver; acked = done
   $('stInflight').textContent = all.filter(l => l.status === 'queued').length;
   const stWaiting = $('stWaiting');
   if (stWaiting) stWaiting.textContent = all.filter(l => l.status === 'delivered' || l.status === 'read').length;
@@ -241,8 +196,8 @@ function feedLine(evt, l) {
   el.innerHTML = `<span class="t">${now()}</span>
     <span class="id" title="${esc(l.id)}" onclick="inspect('${esc(l.id)}')">${esc(l.id.slice(0,8))}</span>
     <span>${esc(l.sender)}</span><span class="arrow">→</span><span>${esc(l.receiver)}</span>
-    <span class="subj">${esc(l.subject || '')}</span>
-    <span class="pill ${evt}">${evt}</span>`;
+    <span class="pill ${evt}">${evt}</span>
+    <span class="subj">${esc(l.subject || '')}</span>`;
   feed.prepend(el);
   while (feed.children.length > 300) feed.lastChild.remove();
 }
@@ -261,74 +216,88 @@ window.inspect = function(id) {
     (l.delivered_at ? `<b>delivered</b>  ${esc(l.delivered_at.slice(0,19))}\n` : '') +
     (l.read_at ? `<b>read</b>      ${esc(l.read_at.slice(0,19))}\n` : '') +
     (l.acked_at ? `<b>acked</b>     ${esc(l.acked_at.slice(0,19))}${l.ack_note ? ' — ' + esc(l.ack_note) : ''}\n` : '');
+  if (window.innerWidth < 700) $('inspector').scrollIntoView({behavior:'smooth', block:'nearest'});
 };
 
 /* ---------- graph ---------- */
-let edges = {};  // "s|r" -> count
-let hotEdge = null, hotUntil = 0;
-
-function addEdge(s, r) {
-  if (s === r) return null;
-  const k = s + '|' + r;
-  edges[k] = (edges[k] || 0) + 1;
-  hotEdge = k; hotUntil = Date.now() + 4000;
-  return k;
-}
 
 function renderGraph() {
   const svg = $('graph');
-  const W = svg.clientWidth || 700, H = svg.clientHeight || 460;
+  const W = svg.clientWidth || 360, H = svg.clientHeight || 320;
   const names = [...agents].sort();
   if (names.length === 0) { svg.innerHTML = `<text x="50%" y="50%" fill="#8b949e" text-anchor="middle">waiting for letters…</text>`; return; }
-  const cx = W/2, cy = H/2, R = Math.min(W, H)/2 - 60;
+  const cx = W/2, cy = H/2;
+  const R = Math.max(90, Math.min(W, H)/2 - (window.innerWidth < 700 ? 44 : 60));
   const pos = {};
   names.forEach((n, i) => {
     const a = (i / names.length) * Math.PI * 2 - Math.PI/2;
     pos[n] = [cx + R * Math.cos(a), cy + R * Math.sin(a)];
   });
-  let svgStr = '';
-  const letters_list = Object.values(letters);
 
-  // ── per-pair edge aggregation: who gave what to whom ──
-  // edges2["s|r"] = { total, queued, waiting, done, latest }
-  const edges2 = {};
-  for (const l of letters_list) {
-    if (l.sender === l.receiver) continue;  // self-loopback noise
+  // ── RFC: per-pair interaction history, newest-first, capped at 3 ──
+  const pairs = {};
+  for (const l of Object.values(letters)) {
+    if (l.sender === l.receiver) continue;
     const k = l.sender + '|' + l.receiver;
-    const e = edges2[k] || (edges2[k] = { total: 0, queued: 0, waiting: 0, done: 0, latest: null });
-    e.total++;
-    if (l.status === 'queued') e.queued++;
-    else if (l.status === 'delivered' || l.status === 'read') e.waiting++;
-    else e.done++;
-    if (!e.latest || (l.created_at || '') > (e.latest.created_at || '')) e.latest = l;
+    (pairs[k] || (pairs[k] = [])).push(l);
+  }
+  // sort each pair's letters newest-first, keep only the latest 3 interactions
+  for (const k of Object.keys(pairs)) {
+    pairs[k].sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
+    pairs[k] = pairs[k].slice(0, 3);
   }
 
-  for (const [k, e] of Object.entries(edges2)) {
+  let svgStr = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff88"/></marker></defs>`;
+
+  for (const [k, ls] of Object.entries(pairs)) {
     const [s, r] = k.split('|');
     if (!pos[s] || !pos[r]) continue;
-    const hot = (e.queued + e.waiting) > 0;
     const [x1, y1] = pos[s], [x2, y2] = pos[r];
-    const mx = (x1+x2)/2 + (y2-y1)*0.08, my = (y1+y2)/2 + (x1-x2)*0.08;
-    // edge styling: active pipeline (has queued/waiting) vs completed-only
-    const cls = e.queued > 0 ? 'edge active' : hot ? 'edge warm' : 'edge done';
-    svgStr += `<path class="${cls}" d="M${x1},${y1} Q${mx},${my} ${x2},${y2}" fill="none" marker-end="url(#arr)"/>`;
-    // edge label: "A → B  nletters [state]"
-    const stateTxt = e.queued > 0 ? `${e.queued} in flight` : e.waiting > 0 ? `${e.waiting} waiting` : `${e.done} done`;
-    svgStr += `<text x="${mx}" y="${my-4}" fill="${e.queued > 0 ? '#58a6ff' : hot ? '#d29922' : '#8b949e'}" font-size="10" text-anchor="middle" font-family="monospace">${esc(s)}→${esc(r)} · ${e.total} · ${stateTxt}</text>`;
+    // aggregate the (≤3) kept letters for style
+    const queued = ls.filter(l => l.status === 'queued').length;
+    const waiting = ls.filter(l => l.status === 'delivered' || l.status === 'read').length;
+    const latest = ls[0];
+    const hot = (queued + waiting) > 0;
+    const cls = queued > 0 ? 'edge active' : hot ? 'edge warm' : 'edge done';
+    // recency → opacity: newest of the kept = 1.0, then 0.65, 0.4
+    const opac = [1, .65, .4];
+    // one line per recent interaction (max 3), fanning slightly so they don't overlap
+    ls.forEach((l, i) => {
+      const fan = (i - (ls.length - 1) / 2) * 14; // px offset per interaction
+      const dx = (y2 - y1), dy = (x1 - x2);
+      const len = Math.hypot(dx, dy) || 1;
+      const mx = (x1+x2)/2 + (dy/len)*fan + (y2-y1)*0.06, my = (y1+y2)/2 - (dx/len)*fan + (x1-x2)*0.06;
+      const ageOp = opac[Math.min(i, 2)];
+      const line = `${cls}${i === 0 ? '' : ' older'}`.trim();
+      svgStr += `<path class="${line}" d="M${x1},${y1} Q${mx},${my} ${x2},${y2}" fill="none" marker-end="url(#arr)" opacity="${ageOp}"/>`;
+      // arrow-style annotation: single compact chip on the NEWEST interaction only
+      if (i === 0) {
+        const queuedN = ls.filter(x => x.status === 'queued').length;
+        const waitingN = ls.filter(x => x.status === 'delivered' || x.status === 'read').length;
+        const stateTxt = queuedN > 0 ? `${queuedN}▶` : waitingN > 0 ? `${waitingN}⏳` : '✓';
+        const chip = `${esc(s.slice(0,4))}→${esc(r.slice(0,4))} ${ls.length} ${stateTxt}`;
+        const fs = window.innerWidth < 700 ? 9 : 10;
+        const w = chip.length * fs * 0.62 + 10;
+        svgStr += `<g opacity="${ageOp}">` +
+          `<rect x="${mx - w/2}" y="${my - 9}" width="${w}" height="15" rx="7" fill="#0d1117ee" stroke="${queuedN > 0 ? '#d29922' : '#30363d'}" stroke-width="1"/>` +
+          `<text x="${mx}" y="${my + 2}" fill="${queuedN > 0 ? '#d29922' : hot ? '#58a6ff' : '#8b949e'}" font-size="${fs}" text-anchor="middle" font-family="monospace">${chip}</text></g>`;
+      }
+    });
   }
 
+  const nodeR = window.innerWidth < 700 ? 22 : 26;
   names.forEach((n, i) => {
     const [x, y] = pos[n];
     const c = teamColor(n, i);
-    const inflight = letters_list.filter(l => l.receiver === n && l.status === 'queued').length;
-    const waiting = letters_list.filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
+    const inflight = Object.values(letters).filter(l => l.receiver === n && l.status === 'queued').length;
+    const waiting = Object.values(letters).filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
     svgStr += `<g class="node ${(inflight + waiting) > 0 ? 'hot' : ''}">
-      <circle cx="${x}" cy="${y}" r="${26 + Math.min(inflight + waiting, 5)}" stroke="${c}"/>
+      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${c}"/>
       <text x="${x}" y="${y + 4}">${esc(n.slice(0, 9))}</text>
-      <text class="cnt" x="${x}" y="${y + 42}">${inflight > 0 && waiting > 0 ? inflight + ' in flight · ' + waiting + ' waiting' : inflight > 0 ? inflight + ' in flight' : waiting > 0 ? waiting + ' waiting' : 'idle'}</text>
+      <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : 'idle'}</text>
     </g>`;
   });
-  svg.innerHTML = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff88"/></marker></defs>` + svgStr;
+  svg.innerHTML = svgStr;
 }
 
 /* ---------- data boot ---------- */
@@ -339,7 +308,6 @@ async function loadSnapshot() {
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/list', params:{}}) });
     const d = await r.json();
     (d.result || []).forEach(l => { upsertLetter(l); });
-    // rebuild feed quietly (latest 40)
     const feed = $('feed'); feed.innerHTML = ''; feedCount = 0;
     Object.values(letters).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')).slice(0, 40)
       .forEach(l => feedLine(l.status, l));
@@ -349,7 +317,7 @@ async function loadSnapshot() {
 
 function connect() {
   ws = new WebSocket(WS_URL);
-  ws.onopen = () => { $('dot').classList.add('live'); $('connTxt').textContent = 'live · ws connected'; };
+  ws.onopen = () => { $('dot').classList.add('live'); $('connTxt').textContent = 'live'; };
   ws.onmessage = ev => {
     let d; try { d = JSON.parse(ev.data); } catch { return; }
     if (d.event === 'hello') {
@@ -359,9 +327,7 @@ function connect() {
     if (d.event === 'heartbeat') { $('connTxt').textContent = 'live · hb ' + now(); return; }
     const l = d.message || d;
     if (!l.id) return;
-    const prev = letters[l.id];
     upsertLetter(Object.assign({}, l, { status: d.event === 'queued' ? 'queued' : (l.status || d.event) }));
-    if (d.event === 'queued') { addEdge(l.sender, l.receiver); }
     feedLine(d.event, letters[l.id]);
     refreshStats(); renderAgents(); renderGraph();
   };
@@ -372,7 +338,7 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-setInterval(() => { if (Date.now() > hotUntil) renderGraph(); }, 2000); // cool hot edges
+setInterval(renderGraph, 4000);
 window.addEventListener('resize', renderGraph);
 loadSnapshot().then(connect);
 </script>
