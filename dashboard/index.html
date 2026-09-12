@@ -229,8 +229,9 @@ function renderGraph() {
   const svg = $('graph');
   const W = svg.clientWidth || 360, H = svg.clientHeight || 320;
   const isMobile = window.innerWidth < 700;
-  // 'all' is a broadcast address, not an agent — never draw it as a node.
-  const names = [...agents].filter(n => n && n.toLowerCase() !== 'all').sort();
+  // 'all' is a broadcast address, 'sho' is the TG<->bus bridge mailbox (human's pipe) —
+  // neither is an AI agent; never draw them as nodes.
+  const names = [...agents].filter(n => n && n.toLowerCase() !== 'all' && n.toLowerCase() !== 'sho').sort();
   if (names.length === 0) { svg.innerHTML = `<text x="50%" y="50%" fill="#8b949e" text-anchor="middle">waiting for letters…</text>`; return; }
   const cx = W/2, cy = H/2;
   const R = Math.max(90, Math.min(W, H)/2 - (isMobile ? 44 : 60));
