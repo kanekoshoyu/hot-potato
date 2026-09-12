@@ -103,7 +103,7 @@
 <body>
 <header>
   <h1>🥔 Hot Potato <span>— EventMessageBus · live dashboard</span></h1>
-  <div class="conn"><span class="dot" id="dot"></span><span id="connTxt">connecting…</span></div>
+  <div class="conn"><span id="verChip" style="color:var(--yellow);font-family:var(--mono);font-size:11px">v…</span><span class="dot" id="dot"></span><span id="connTxt">connecting…</span></div>
 </header>
 
 <div class="stats-row">
@@ -177,6 +177,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const now = () => new Date().toTimeString().slice(0, 8);
 
 const RPC = (location.origin.includes(':8000') ? location.origin.replace(':8000', ':8082') : location.origin) + '/';
+const nobust = () => '_cb=' + Date.now();
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 
 const letters = {};
@@ -529,6 +530,13 @@ function renderPotatoes() {
 }
 
 restoreFilterUI();
+(async () => {
+  try {
+    const r = await fetch('version', {cache: 'no-store'});
+    const v = await r.json();
+    $('verChip').textContent = 'v' + v.version + ' · ' + v.built_at.slice(5,16).replace('T',' ');
+  } catch { $('verChip').textContent = 'v?'; }
+})();
 loadSnapshot().then(connect);
 </script>
 </body>
