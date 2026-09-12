@@ -286,14 +286,22 @@ function renderAgents() {
   }).join('') || '<div class="agent"><span class="sub">no potatoes yet</span></div>';
 }
 
-function feedLine(evt, l) {
+function feedLine(evt, l, opts) {
   const feed = $('feed');
+  // dedupe: same id+event already rendered? skip (snapshot rebuilds don't reset the feed)
+  const evtKey = l.id + '|' + evt;
+  if (!opts?.rebuild && feed.querySelector(`[data-evt="${CSS.escape(evtKey)}"]`)) return;
   if (feedCount === 0) feed.innerHTML = '';
   feedCount++;
   $('feedCount').textContent = `(${feedCount})`;
   const el = document.createElement('div');
   el.className = 'evt';
-  el.innerHTML = `<span class="t">${now()}</span>
+  el.dataset.evt = evtKey;
+  // real event time from the letter (not render time) — relative + absolute on hover
+  const ts = parseTs(l.acked_at || l.read_at || l.delivered_at || l.created_at);
+  const tTxt = isNaN(ts) ? now() : fmtAgoShort(ts);
+  const tTitle = isNaN(ts) ? '' : new Date(ts).toLocaleString();
+  el.innerHTML = `<span class="t" title="${esc(tTitle)}">${tTxt}</span>
     <span class="id" title="${esc(l.id)}" onclick="inspect('${esc(l.id)}')">${esc(l.id.slice(0,8))}</span>
     <span>${esc(l.sender)}</span><span class="arrow">→</span><span>${esc(l.receiver)}</span>
     <span class="pill ${evt}">${evt}</span>
@@ -301,6 +309,13 @@ function feedLine(evt, l) {
     <button class="del-btn" title="delete this potato" onclick="deleteLetter('${esc(l.id)}')">✕</button>`;
   feed.prepend(el);
   while (feed.children.length > 300) feed.lastChild.remove();
+}
+function fmtAgoShort(ts) {
+  const sec = Math.max(0, Math.round((Date.now() - ts)/1000));
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.round(sec/60) + 'm ago';
+  if (sec < 86400) return Math.round(sec/3600) + 'h ago';
+  return Math.round(sec/86400) + 'd ago';
 }
 
 window.deleteLetter = async function(id) {
@@ -565,7 +580,7 @@ async function loadSnapshot() {
     const d = await r.json();
     (d.result || []).forEach(l => { upsertLetter(l); });
     applyFilter();
-    const feed = $('feed'); feed.innerHTML = ''; feedCount = 0;
+    // merge into feed (newest first), dedupe by id+event — refresh no longer resets the feed
     Object.values(letters).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')).slice(0, 40)
       .forEach(l => feedLine(l.status, l));
     refreshStats(); renderAgents(); renderGraph();
