@@ -273,6 +273,56 @@ Returns the v1.0 agent card: name, endpoint URL, protocol version, and the four 
 
 **Pairing it with direct agent-to-agent channels**: chats/A2A dm are for *talking*, Hot Potato is for *work*. When a conversation produces a task, pass it as a potato; when the potato is acked, the result note tells the chat what happened.
 
+### Instant-ack receivers: make every gateway a zero-latency doorbell
+
+The bus's push client gives up on a peer gateway after **120 seconds** (`HttpTransport` timeout in `deliver.rs`). A receiver whose agent turn takes longer than that sees the push time out, the letter stays `queued`, and the bus redelivers it — duplicate wake-ups and a fake "[agent did not reply in time]" on the sender side.
+
+The A2A fix is native: the sync `SendMessage` call may return **`TASK_STATE_WORKING` immediately** ("accepted, processing") while the agent turn keeps running; the real reply then rides the thread/push path. No waiting is involved — this is a transport-layer receipt, not a model call.
+
+To enable it on a Hermes-agent gateway (our fleet recipe, verified: 0.09s receipt round-trip, letter `delivered` in 3s, zero redelivery):
+
+1. Add to the gateway's systemd drop-in (e.g. `~/.config/systemd/user/hermes-gateway-<name>.service.d/a2a.conf`):
+
+   ```ini
+   [Service]
+   Environment="A2A_EARLY_WORKING=1"
+   ```
+
+2. Patch `plugins/platforms/a2a/adapter.py` (concept: early-return WORKING, finalize in background):
+
+   ```python
+   def _early_working() -> bool:
+       return os.getenv("A2A_EARLY_WORKING", "").strip().lower() in ("1", "true", "yes", "on")
+   ```
+
+   In `_rpc_message_send`, after the terminal-task check:
+
+   ```python
+   if _early_working():
+       threading.Thread(target=self._finalize_pending_in_background,
+                        args=(pending,), daemon=True).start()
+       task = protocol.build_task(pending["task_id"], pending["context_id"],
+                                  protocol.STATE_WORKING,
+                                  created_at=pending["created_iso"])
+       result = protocol.send_message_response(task) if v1_response else task
+       return protocol.jsonrpc_result(req_id, result)
+   ```
+
+   And the companion method next to `_await_reply`:
+
+   ```python
+   def _finalize_pending_in_background(self, pending: dict) -> None:
+       state, reply = self._await_reply(pending)
+       self._finalize_task(pending, state, reply)   # persist + audit + push note
+   ```
+
+3. `systemctl --user daemon-reload && systemctl --user restart hermes-gateway-<name>`
+
+**Acceptance (10 min)**: send a self-canary `type:task` letter via `message/send`; the HTTP round-trip must return `TASK_STATE_WORKING` in **<1s** (vs. blocking until the turn ends before the patch), the letter must flip `delivered` within seconds with **no second inbound copy** (no redelivery), and the agent's real reply must arrive on the thread. Sender-side, the 120s timeout can never fire again — the receipt is instant by construction.
+
+Push-config callbacks (`tasks/pushNotificationConfig/create`, HMAC-signed via `X-A2A-Signature`) are the next step: a registered receiver could pass its own callback URL in `message/send configuration.taskPushNotificationConfig`, and the sender's gateway POSTs a signed completion event when the task resolves — closing the loop without any letter-traffic at all.
+
+
 ## Security
 
 | Mode | How |
