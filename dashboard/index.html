@@ -60,11 +60,12 @@
   @media (min-width: 700px) { .graph-wrap { height: 460px; } }
   svg { width: 100%; height: 100%; touch-action: pan-y; }
   .edge { stroke: #30363d; stroke-width: 1.5; fill: none; }
-  .edge.active { stroke-width: 2.5; }
-  .edge.warm { stroke-width: 2; }
-  .edge.done { stroke-width: 1; }
-  .node circle { fill: var(--panel); stroke: var(--blue); stroke-width: 2; cursor: pointer; transition: r .2s; }
-  .node.hot circle { filter: drop-shadow(0 0 6px var(--yellow)); }
+  .edge.active { stroke: #ffd54d; stroke-width: 3; }
+  .edge.warm { stroke: #d29922; stroke-width: 2; }
+  .edge.done { stroke: #30363d; stroke-width: 1; }
+  .edge.bcast { stroke: #6e7681; stroke-width: 1.2; stroke-dasharray: 3 4; }
+  .node circle { fill: var(--panel); stroke-width: 2.5; cursor: pointer; transition: r .2s; }
+  .node.hot circle { }
   .node text { fill: var(--text); font-size: 12px; font-family: var(--mono); text-anchor: middle; }
   .node .cnt { fill: var(--dim); font-size: 10px; }
   /* legend */
@@ -114,7 +115,10 @@
         <span class="li"><span class="sw solid"></span>in flight (queued)</span>
         <span class="li"><span class="sw dashed"></span>waiting on reply</span>
         <span class="li"><span class="sw faded"></span>done / idle</span>
-        <span class="li" style="color:var(--dim)">brightness = recency (newest brightest · max 3 shown)</span>
+        <span class="li"><span class="sw node-on" style="border-top-width:8px;border-top-color:#ffd54d"></span>active node</span>
+        <span class="li"><span class="sw node-off" style="border-top-width:8px;border-top-color:#6e7681"></span>idle node</span>
+        <span class="li"><span class="sw" style="border-top-width:8px;border-top-color:#e6edf3"></span>👤 human (you)</span>
+        <span class="li" style="color:var(--dim)">brightness = recency (newest brightest · max 3 shown) · arrowhead = direction</span>
       </div>
       <div class="graph-wrap"><svg id="graph"></svg></div>
     </div>
@@ -224,10 +228,12 @@ window.inspect = function(id) {
 function renderGraph() {
   const svg = $('graph');
   const W = svg.clientWidth || 360, H = svg.clientHeight || 320;
-  const names = [...agents].sort();
+  const isMobile = window.innerWidth < 700;
+  // 'all' is a broadcast address, not an agent — never draw it as a node.
+  const names = [...agents].filter(n => n && n.toLowerCase() !== 'all').sort();
   if (names.length === 0) { svg.innerHTML = `<text x="50%" y="50%" fill="#8b949e" text-anchor="middle">waiting for letters…</text>`; return; }
   const cx = W/2, cy = H/2;
-  const R = Math.max(90, Math.min(W, H)/2 - (window.innerWidth < 700 ? 44 : 60));
+  const R = Math.max(90, Math.min(W, H)/2 - (isMobile ? 44 : 60));
   const pos = {};
   names.forEach((n, i) => {
     const a = (i / names.length) * Math.PI * 2 - Math.PI/2;
@@ -247,7 +253,23 @@ function renderGraph() {
     pairs[k] = pairs[k].slice(0, 3);
   }
 
-  let svgStr = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff88"/></marker></defs>`;
+  // Broadcast edges (to 'all'): draw as faint dashed rays from sender, no arrowhead, no pair history
+  const bcast = Object.values(letters).filter(l => (l.receiver||'').toLowerCase() === 'all');
+  const bSenders = [...new Set(bcast.map(l => l.sender))].filter(s => pos[s]);
+  bSenders.forEach(s => {
+    const [x1, y1] = pos[s];
+    // ray outward from center through the sender, beyond it
+    const dx = x1 - cx, dy = y1 - cy;
+    const len = Math.hypot(dx, dy) || 1;
+    const x2 = x1 + (dx/len) * 46, y2 = y1 + (dy/len) * 46;
+    svgStr += `<path class="edge bcast" d="M${x1},${y1} L${x2},${y2}" fill="none" opacity="0.55"/>`;
+    svgStr += `<text x="${x2}" y="${y2 + 4}" fill="#8b949e" font-size="${isMobile ? 9 : 10}" font-family="monospace" text-anchor="middle">broadcast</text>`;
+  });
+
+  let svgStr = `<defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker>
+    <marker id="arrHot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ffd54d"/></marker>
+  </defs>`;
 
   for (const [k, ls] of Object.entries(pairs)) {
     const [s, r] = k.split('|');
@@ -256,35 +278,42 @@ function renderGraph() {
     // aggregate the (≤3) kept letters for style
     const queued = ls.filter(l => l.status === 'queued').length;
     const waiting = ls.filter(l => l.status === 'delivered' || l.status === 'read').length;
-    const latest = ls[0];
     const hot = (queued + waiting) > 0;
     const cls = queued > 0 ? 'edge active' : hot ? 'edge warm' : 'edge done';
+    const marker = queued > 0 ? 'arrHot' : 'arr';
+    // stop the line at the edge of the target circle so the arrowhead is visible
+    const gap = (nodeR || 24) + 6;
+    const ang = Math.atan2(y2 - y1, x2 - x1);
+    const ex = x2 - Math.cos(ang) * gap, ey = y2 - Math.sin(ang) * gap;
     // recency → opacity: newest of the kept = 1.0, then 0.65, 0.4
     const opac = [1, .65, .4];
     // one line per recent interaction (max 3), fanning slightly so they don't overlap.
-    // NO text chips — the direction arrowhead on the line itself shows who → whom;
-    // tap either endpoint node for per-agent stats + per-letter timing.
     ls.forEach((l, i) => {
-      const fan = (i - (ls.length - 1) / 2) * 14; // px offset per interaction
+      const fan = (i - (ls.length - 1) / 2) * 16; // px offset per interaction
       const dx = (y2 - y1), dy = (x1 - x2);
       const len = Math.hypot(dx, dy) || 1;
-      const mx = (x1+x2)/2 + (dy/len)*fan + (y2-y1)*0.06, my = (y1+y2)/2 - (dx/len)*fan + (x1-x2)*0.06;
+      const mx = (x1+x2)/2 + (dy/len)*fan + (y2-y1)*0.08, my = (y1+y2)/2 - (dx/len)*fan + (x1-x2)*0.08;
       const ageOp = opac[Math.min(i, 2)];
       const line = `${cls}${i === 0 ? '' : ' older'}`.trim();
-      svgStr += `<path class="${line}" d="M${x1},${y1} Q${mx},${my} ${x2},${y2}" fill="none" marker-end="url(#arr)" opacity="${ageOp}"/>`;
+      const mk = i === 0 ? marker : 'arr';
+      svgStr += `<path class="${line}" d="M${x1},${y1} Q${mx},${my} ${ex},${ey}" fill="none" marker-end="url(#${mk})" opacity="${ageOp}"/>`;
     });
   }
 
-  const nodeR = window.innerWidth < 700 ? 22 : 26;
-  names.forEach((n, i) => {
+  const nodeR = isMobile ? 22 : 26;
+  names.forEach((n) => {
     const [x, y] = pos[n];
-    const c = teamColor(n, i);
+    const isHuman = n === 'sho';
     const inflight = Object.values(letters).filter(l => l.receiver === n && l.status === 'queued').length;
     const waiting = Object.values(letters).filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
-    svgStr += `<g class="node ${(inflight + waiting) > 0 ? 'hot' : ''}" onclick="agentStats('${esc(n)}')" style="cursor:pointer">
-      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${c}"/>
-      <text x="${x}" y="${y + 4}">${esc(n.slice(0, 9))}</text>
-      <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : 'idle'}</text>
+    const active = (inflight + waiting) > 0;
+    // color semantics — ONE system: yellow glow = active, dim grey = idle, white + 👤 = human
+    const stroke = isHuman ? '#e6edf3' : active ? '#ffd54d' : '#6e7681';
+    const label = isHuman ? '👤' + n.slice(0, 8) : n.slice(0, 9);
+    svgStr += `<g class="node ${active ? 'hot' : ''}" onclick="agentStats('${esc(n)}')" style="cursor:pointer">
+      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${stroke}" style="filter:${active ? 'drop-shadow(0 0 7px #ffd54dcc)' : 'none'}"/>
+      <text x="${x}" y="${y + 4}">${esc(label)}</text>
+      <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : isHuman ? 'human' : 'idle'}</text>
     </g>`;
   });
   svg.innerHTML = svgStr;
