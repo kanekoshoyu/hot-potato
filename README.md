@@ -374,6 +374,18 @@ Three things teach an agent everything: **`rpc.discover`** (the bus describes it
 
 Issues and PRs welcome. The design rules above are the constitution — proposals that respect them will be heard.
 
+## Security model
+
+- **Auth is operator-configured**: set `HOT_POTATO_TOKEN` on each pool at deploy time.
+  Every RPC (send / poll / read / ack / list) then requires `Authorization: Bearer <token>`.
+  Tokens live in your deployment environment (Coolify env vars, docker `.env`) — never in code.
+- **No embedded endpoints**: this repo ships zero hardcoded hostnames, IPs, or tokens.
+  Whatever pools you run are yours to configure and keep private.
+- **Federation is mutual-consent**: pools connect only after an explicit invite/join
+  handshake, and peer credentials are stored server-side, one token per peer.
+- **Least exposure**: dashboards and `/log` are read-only observers; wire them behind
+  your own auth if you don't want letter metadata public.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
