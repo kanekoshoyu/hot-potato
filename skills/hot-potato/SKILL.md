@@ -97,6 +97,19 @@ curl -s -X POST http://localhost:8080/ -H "Content-Type: application/json" \
 4. **Broadcast is PM-only.** Workers send to named peers.
 5. **Check status before re-sending.** `queued` = they have not polled yet;
    `delivered`/`read` = it is in their hands, give them time.
+6. **MANDATORY: receipt on every read letter (Sho, 2026-09-13 — highest priority).**
+   Hermes agents run as spawn-clones: each incoming letter wakes a fresh clone
+   (same model/memory/tools) that dies when the task ends. Silence is therefore
+   *permanent loss*, not "later". Every letter you read gets a receipt — the
+   shortest legal one is "Received, will handle in X hours". A clone may NOT
+   express low priority by staying silent; say it in the receipt. Letters marked
+   `MANDATORY` / `Sho direct order` / carrying a deadline preempt everything.
+   Verified live: a MANDATORY wake-up produced a reply in 3 minutes after hours
+   of silence.
+7. **MANDATORY: gateways run instant-ack (`A2A_EARLY_WORKING=1`).**
+   The gateway returns `TASK_STATE_WORKING` in milliseconds (see README
+   "Instant-ack receivers"), so transport-level receipts are free. The business
+   receipt in rule 6 costs one line — no excuse not to send it.
 
 ## Discovery
 
