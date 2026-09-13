@@ -308,6 +308,85 @@ async fn rpc(
                 }))
                 .collect::<Vec<_>>()))
         }
+        "message/thread" => {
+            // v0.3.13: trajectory query — one potato's full journey. Pass an id
+            // (any letter in the thread); the bus walks the ref-chain to the root
+            // and returns every letter belonging to that thread, oldest-first,
+            // each with its lifecycle timestamps. Cross-pool forwarded copies
+            // (hops>0, forwarded_from set) are included so the caller sees the
+            // full A→B→A trajectory.
+            let id = req
+                .params
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":"missing param: id"}})),
+                );
+            }
+            let all = bus.list_all().await.unwrap_or_default();
+            let anchor = match all.iter().find(|m| m.id == id) {
+                Some(m) => m,
+                None => {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":format!("message not found: {id}")}})),
+                    );
+                }
+            };
+            // walk to the thread root
+            let by_id: std::collections::HashMap<&str, &crate::message::Message> =
+                all.iter().map(|m| (m.id.as_str(), m)).collect();
+            let mut root_id = anchor.id.clone();
+            for _ in 0..16 {
+                match &anchor.r#ref {
+                    Some(r) if by_id.contains_key(r.as_str()) => root_id = r.clone(),
+                    _ => break,
+                }
+            }
+            // collect the thread: root + everything whose ref-chain reaches it
+            let mut members: Vec<&crate::message::Message> = Vec::new();
+            for m in &all {
+                let mut cur = m.id.clone();
+                let mut hit = cur == root_id;
+                for _ in 0..16 {
+                    match by_id.get(cur.as_str()).and_then(|x| x.r#ref.clone()) {
+                        Some(r) => {
+                            cur = r;
+                            if cur == root_id {
+                                hit = true;
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                if hit {
+                    members.push(m);
+                }
+            }
+            members.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            Ok(json!(members
+                .iter()
+                .map(|m| json!({
+                    "id": m.id,
+                    "sender": m.sender,
+                    "receiver": m.receiver,
+                    "msg_type": m.msg_type,
+                    "subject": m.subject,
+                    "status": format!("{:?}", m.status).to_lowercase(),
+                    "created_at": m.created_at,
+                    "delivered_at": m.delivered_at,
+                    "read_at": m.read_at,
+                    "acked_at": m.acked_at,
+                    "hops": m.hops,
+                    "forwarded_from": m.forwarded_from,
+                }))
+                .collect::<Vec<_>>()))
+        }
         "message/send" => {
             parse5(&req.params, |sender, receiver, msg_type, subject, body| {
                 let mt = match msg_type {
