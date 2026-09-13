@@ -180,6 +180,31 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const now = () => new Date().toTimeString().slice(0, 8);
 
+// ── Short IDs (Sho: hashes are unreadable — give every potato a ≤15-char id) ──
+// Base31 alphabet (32 chars MINUS one: we need a modulus-safe length, and
+// dropping 'I' removes the 1/I/L confusion family). Deterministic from the
+// full id; collisions resolved by linear probe. Full hash stays in tooltip.
+const SID_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'; // 31 chars, no 0/1/I/L/O
+const SID_MOD = SID_ALPHABET.length;                    // 31 — matches .length exactly
+const sidMap = new Map();            // full id -> short
+const sidTaken = new Set();          // assigned shorts (cross-id uniqueness)
+function shortId(fullId) {
+  if (!fullId) return '';
+  if (sidMap.has(fullId)) return sidMap.get(fullId);
+  let h = 0;
+  for (let i = 0; i < fullId.length; i++) h = (h * 31 + fullId.charCodeAt(i)) >>> 0;
+  let candidate = '';
+  do {
+    candidate = 'p-';
+    let x = h;
+    for (let i = 0; i < 5; i++) { candidate += SID_ALPHABET[x % SID_MOD]; x = Math.floor(x / SID_MOD); }
+    h = (h + 7919) >>> 0; // linear probe on collision
+  } while (sidTaken.has(candidate));
+  sidTaken.add(candidate);
+  sidMap.set(fullId, candidate);
+  return candidate;
+}
+
 const RPC = (location.origin.includes(':8000') ? location.origin.replace(':8000', ':8082') : location.origin) + '/';
 // Auth (v0.3.9): dashboard/login exchanges username+password (server env:
 // HOT_POTATO_DASHBOARD_USER / HOT_POTATO_DASHBOARD_PASSWORD, default
@@ -302,7 +327,7 @@ function feedLine(evt, l, opts) {
   const tTxt = isNaN(ts) ? now() : fmtAgoShort(ts);
   const tTitle = isNaN(ts) ? '' : new Date(ts).toLocaleString();
   el.innerHTML = `<span class="t" title="${esc(tTitle)}">${tTxt}</span>
-    <span class="id" title="${esc(l.id)}" onclick="inspect('${esc(l.id)}')">${esc(l.id.slice(0,8))}</span>
+    <span class="id" title="${esc(l.id)}" onclick="inspect('${esc(l.id)}')">${esc(shortId(l.id))}</span>
     <span>${esc(l.sender)}</span><span class="arrow">→</span><span>${esc(l.receiver)}</span>
     <span class="pill ${evt}">${evt}</span>
     <span class="subj">${esc(l.subject || '')}</span>
@@ -319,7 +344,7 @@ function fmtAgoShort(ts) {
 }
 
 window.deleteLetter = async function(id) {
-  if (!confirm('Delete potato ' + id.slice(0,8) + '? This cannot be undone.')) return;
+  if (!confirm('Delete potato ' + shortId(id) + '? This cannot be undone.')) return;
   try {
     await fetch(RPC, { method:'POST', headers:{'Content-Type':'application/json', ...AUTH_HEADERS},
       body: JSON.stringify({jsonrpc:'2.0', id:1, method:'message/delete', params:{ id }}) });
@@ -341,7 +366,7 @@ window.deleteAllLetters = async function() {
 window.inspect = function(id) {
   const l = letters[id];
   if (!l) return;
-  $('inspId').textContent = id.slice(0, 8);
+  $('inspId').textContent = shortId(id);
   $('inspector').innerHTML =
     `<b>id</b>      ${esc(l.id)}\n` +
     `<b>from</b>    ${esc(l.sender)}  →  <b>to</b>  ${esc(l.receiver)}\n` +
@@ -670,12 +695,33 @@ function renderPairDrill(pairKey) {
     const hops = ls.sort((a,b) => (a.created_at||'').localeCompare(b.created_at||''));
     const last = hops[hops.length - 1];
     const cl = threadClass(last, nowMs);
+    const threadShort = shortId(rootId);
+    // ── Journey strip (Sho: one potato = one readable trajectory) ──
+    // horizontal circle-nodes: each hop is a station (sender → receiver),
+    // state-colored; click a station to inspect that letter.
+    const journeySvg = (() => {
+      const n = hops.length, W = Math.max(280, n * 92 + 40), H = 64, step = (W - 60) / Math.max(1, n - 1);
+      const COL = { queued: '#d29922', delivered: '#58a6ff', read: '#58a6ff', acked: '#3fb950' };
+      let s = `<svg width="${W}" height="${H}" style="display:block;max-width:100%">`;
+      s += `<line x1="30" y1="${H/2}" x2="${W-30}" y2="${H/2}" stroke="#30363d" stroke-width="2"/>`;
+      hops.forEach((h, i) => {
+        const x = 30 + i * step;
+        const col = COL[h.status] || '#8b949e';
+        const label = `${esc(h.sender)}→${esc(h.receiver)}`;
+        s += `<circle cx="${x}" cy="${H/2}" r="9" fill="#0d1117" stroke="${col}" stroke-width="2.5" style="cursor:pointer" onclick="inspect('${esc(h.id)}')"><title>${esc(h.sender)} → ${esc(h.receiver)} · ${esc(h.status)} · ${fmtAgo(h.created_at)} ago</title></circle>`;
+        s += `<text x="${x}" y="${H/2 - 16}" fill="${col}" font-size="9" text-anchor="middle" font-family="monospace">${esc(h.status)}</text>`;
+        s += `<text x="${x}" y="${H/2 + 24}" fill="#8b949e" font-size="9" text-anchor="middle" font-family="monospace">${esc(label.length > 16 ? label.slice(0,15) + '…' : label)}</text>`;
+      });
+      s += '</svg>';
+      return s;
+    })();
     out += `<div class="potato ${cl.cls}" style="opacity:${cl.op}">
-      <div><span class="hid" onclick="inspect('${rootId}')">${rootId.slice(0,8)}</span>
+      <div><span class="hid" onclick="inspect('${rootId}')">${esc(threadShort)}</span>
         <span class="root">${esc((root.subject || '(no subject)').slice(0, 56))}</span>
         <span class="age">· ${fmtAgo(root.created_at)} old · ${hops.length} hop${hops.length > 1 ? 's' : ''}</span>
         ${cl.tag}
-      </div>`;
+      </div>
+      <div style="margin:6px 0 2px">${journeySvg}</div>`;
     for (const h of hops.slice(-4)) {
       const isBlock = h === last && cl.blocked;
       out += `<div class="hop ${isBlock ? 'blocked' : ''}">
