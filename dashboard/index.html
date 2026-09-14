@@ -407,17 +407,19 @@ function renderGraph() {
 
   const nodeR = isMobile ? 22 : 26;
 
-  // ── RFC: per-pair interaction history, newest-first, capped at 3 ──
+  // ── Edges: CURRENT destination only (Sho: no history, just where things sit) ──
+  // One edge per node-with-pending-letters, pointing at the receiver of its
+  // OLDEST pending potato (that's the one that's been waiting longest).
+  // A node with nothing pending draws no edge — idle means idle.
   const pairs = {};
   for (const l of Object.values(letters)) {
     if (l.sender === l.receiver) continue;
+    if (l.status !== 'queued' && l.status !== 'delivered' && l.status !== 'read') continue; // pending only
     const k = l.sender + '|' + l.receiver;
-    (pairs[k] || (pairs[k] = [])).push(l);
-  }
-  // sort each pair's letters newest-first, keep only the latest 3 interactions
-  for (const k of Object.keys(pairs)) {
-    pairs[k].sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
-    pairs[k] = pairs[k].slice(0, 3);
+    const arr = (pairs[k] || (pairs[k] = []));
+    arr.push(l);
+    arr.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '')); // oldest first
+    if (arr.length > 3) arr.length = 3; // cap for edge-stack, oldest kept
   }
 
   let svgStr = `<defs>
