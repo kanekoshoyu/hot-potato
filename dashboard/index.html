@@ -481,13 +481,17 @@ function renderGraph() {
     const waiting = Object.values(letters).filter(l => l.receiver === n && (l.status === 'delivered' || l.status === 'read')).length;
     const active = (inflight + waiting) > 0;
     const isSelected = drillMode === 'agent' && drillAgent === n;
-    // color semantics — ONE system: yellow glow = active, dim grey = idle, white + 👤 = human
-    const stroke = isSelected ? '#58a6ff' : isHuman ? '#e6edf3' : active ? '#ffd54d' : '#6e7681';
-    const label = isHuman ? '👤' + n.slice(0, 8) : n.slice(0, 9);
+    // color semantics — ONE hue: yellow = has potato / selected emphasis,
+    // grey = idle, white + 👤 = human. Selection = thicker ring + stronger
+    // glow of the SAME yellow (no second color — blue read as "other meaning").
+    const stroke = isHuman ? '#e6edf3' : active ? '#ffd54d' : '#6e7681';
+    // label: 2-letter initials (AN, DI, PA…) — eventually replaced by icons
+    const initials = n.slice(0, 2).toUpperCase();
+    const label = isHuman ? '👤' + initials : initials;
     svgStr += `<g class="node ${active ? 'hot' : ''} ${isSelected ? 'selected' : ''}" onclick="openDrill('agent','${esc(n)}')" style="cursor:pointer">
-      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${stroke}" style="filter:${isSelected ? 'drop-shadow(0 0 10px #58a6ffcc)' : active ? 'drop-shadow(0 0 7px #ffd54dcc)' : 'none'}"/>
-      <text x="${x}" y="${y + 4}">${esc(label)}</text>
-      <text class="cnt" x="${x}" y="${y + nodeR + 14}">${inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : isHuman ? 'human' : 'idle'}</text>
+      <circle cx="${x}" cy="${y}" r="${nodeR + Math.min(inflight + waiting, 5)}" stroke="${stroke}" stroke-width="${isSelected ? 5 : 2.5}" style="filter:drop-shadow(0 0 ${isSelected ? 14 : active ? 7 : 0}px ${isSelected ? '#ffd54d' : active ? '#ffd54dcc' : 'transparent'})"/>
+      <text x="${x}" y="${y + 4}" ${isSelected ? 'font-weight="700"' : ''}>${esc(label)}</text>
+      <text class="cnt" x="${x}" y="${y + nodeR + 14}">${isSelected ? '' : (inflight > 0 && waiting > 0 ? inflight + '▶' + waiting + '⏳' : inflight > 0 ? inflight + '▶' : waiting > 0 ? waiting + '⏳' : isHuman ? 'human' : 'idle')}</text>
     </g>`;
   });
   // R1.2: bind edge clicks (hit-paths), then swap svg content in
@@ -498,7 +502,7 @@ function renderGraph() {
   });
   // highlight the selected pair's edges (persists across the 4s re-render via drillMode)
   if (drillMode === 'pair' && drillPair) {
-    svg.querySelectorAll('.edge-hit').forEach(p => { if (p.dataset.pair === drillPair) p.style.stroke = '#58a6ff'; });
+    svg.querySelectorAll('.edge-hit').forEach(p => { if (p.dataset.pair === drillPair) p.style.stroke = '#ffd54d'; });
   }
   // click on empty graph background = clear selection (Sho: deselect on background tap)
   svg.onclick = (e) => { if (e.target.tagName === 'svg' || e.target.tagName === 'SCREEN') closeDrill(); };
@@ -526,21 +530,29 @@ window.agentStats = function(n) {
     return isNaN(a) || isNaN(b) ? '—' : Math.max(0, Math.round((b-a)/1000)) + 's';
   };
   const dir = l => l.sender === n ? `→ ${l.receiver}` : `← ${l.sender}`;
-  $('inspId').textContent = n.slice(0, 12) + ' · stats';
+  const initials = n.slice(0, 2).toUpperCase();
+  $('inspId').textContent = initials + ' · ' + n;
   const target = $('drillPanel').style.display !== 'none' ? $('drillPanel') : $('inspector');
+  const stat = (label, v, hot) =>
+    `<div style="background:var(--panel,#161b22);border:1px solid #30363d;border-radius:6px;padding:6px 8px;min-width:70px">` +
+    `<div style="font-size:17px;font-weight:700;font-family:var(--mono);color:${hot ? '#ffd54d' : '#e6edf3'}">${v}</div>` +
+    `<div style="font-size:9px;color:#8b949e;text-transform:uppercase;letter-spacing:.04em">${label}</div></div>`;
+  const row = cells => `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${cells.join('')}</div>`;
+  const secTitle = t => `<div style="font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.06em;margin:2px 0 6px;font-weight:700">${t}</div>`;
   target.innerHTML =
-    `<b>📥 IN</b>   total ${inn.length}\n` +
-    `   new (未处理)      ${inQ}\n` +
-    `   processing (处理中) ${inP}\n` +
-    `   acked (完成)       ${inD}\n` +
-    `<b>📤 OUT</b>  total ${out.length}\n` +
-    `   sent (等回复)      ${outQ}\n` +
-    `   peer processing    ${outW}\n` +
-    `   acked (对方确认)    ${outD}\n` +
-    `<b>recent letters</b> (耗时 = 到当前状态所用时间)\n` +
+    secTitle('📥 In — ' + inn.length + ' total') +
+    row([stat('new · 未处理', inQ, inQ > 0), stat('processing · 处理中', inP, inP > 0), stat('acked · 完成', inD, false)]) +
+    secTitle('📤 Out — ' + out.length + ' total') +
+    row([stat('sent · 等回复', outQ, outQ > 0), stat('peer processing', outW, outW > 0), stat('acked · 对方确认', outD, false)]) +
+    secTitle('Recent letters · 耗时 = 到当前状态所用时间') +
     mine.map(l =>
-      ` ${dir(l)}  [${esc(l.status)}] ${fmtDur(l)} — ${esc((l.subject||'').slice(0,36))}`
-    ).join('\n');
+      `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 6px;border-left:2px solid ${l.status === 'acked' ? '#3fb950' : l.status === 'queued' ? '#d29922' : '#58a6ff'};margin-bottom:3px;background:#161b2255">` +
+      `<span style="font-family:var(--mono);font-size:11px;color:#8b949e;white-space:nowrap">${esc(dir(l))}</span>` +
+      `<span class="pill ${esc(l.status)}" style="flex-shrink:0">${esc(l.status)}</span>` +
+      `<span style="font-family:var(--mono);font-size:11px;color:#8b949e;white-space:nowrap">${fmtDur(l)}</span>` +
+      `<span style="font-size:11px;color:#e6edf3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((l.subject||'').slice(0,40))}</span>` +
+      `</div>`
+    ).join('') || '<div style="color:#8b949e;font-size:11px">no letters yet</div>';
   if (window.innerWidth < 700) $('drillbar').scrollIntoView({behavior:'smooth', block:'nearest'});
 };
 
@@ -702,17 +714,27 @@ function renderPairDrill(pairKey) {
     // horizontal circle-nodes: each hop is a station (sender → receiver),
     // state-colored; click a station to inspect that letter.
     const journeySvg = (() => {
-      const n = hops.length, W = Math.max(280, n * 92 + 40), H = 64, step = (W - 60) / Math.max(1, n - 1);
-      const COL = { queued: '#d29922', delivered: '#58a6ff', read: '#58a6ff', acked: '#3fb950' };
+      // Station-style journey (Sho: like a train line, not a node graph).
+      // Stations = agent initials (AN, DI, PA). The rail is a single line;
+      // the CURRENT holding station (last hop's receiver) glows yellow —
+      // the potato is "at" that station now. Everything else is grey.
+      const stops = [];
+      hops.forEach(h => {
+        for (const a of [h.sender, h.receiver]) {
+          if (stops[stops.length - 1] !== a) stops.push(a);
+        }
+      });
+      const holder = hops[hops.length - 1].receiver; // who holds the potato now
+      const W = Math.max(280, stops.length * 84 + 40), H = 66, step = (W - 60) / Math.max(1, stops.length - 1);
       let s = `<svg width="${W}" height="${H}" style="display:block;max-width:100%">`;
-      s += `<line x1="30" y1="${H/2}" x2="${W-30}" y2="${H/2}" stroke="#30363d" stroke-width="2"/>`;
-      hops.forEach((h, i) => {
+      s += `<line x1="30" y1="${H/2}" x2="${W-30}" y2="${H/2}" stroke="#30363d" stroke-width="3"/>`;
+      stops.forEach((st, i) => {
         const x = 30 + i * step;
-        const col = COL[h.status] || '#8b949e';
-        const label = `${esc(h.sender)}→${esc(h.receiver)}`;
-        s += `<circle cx="${x}" cy="${H/2}" r="9" fill="#0d1117" stroke="${col}" stroke-width="2.5" style="cursor:pointer" onclick="inspect('${esc(h.id)}')"><title>${esc(h.sender)} → ${esc(h.receiver)} · ${esc(h.status)} · ${fmtAgo(h.created_at)} ago</title></circle>`;
-        s += `<text x="${x}" y="${H/2 - 16}" fill="${col}" font-size="9" text-anchor="middle" font-family="monospace">${esc(h.status)}</text>`;
-        s += `<text x="${x}" y="${H/2 + 24}" fill="#8b949e" font-size="9" text-anchor="middle" font-family="monospace">${esc(label.length > 16 ? label.slice(0,15) + '…' : label)}</text>`;
+        const here = st === holder;
+        const ini = st.slice(0, 2).toUpperCase();
+        s += `<circle cx="${x}" cy="${H/2}" r="10" fill="#0d1117" stroke="${here ? '#ffd54d' : '#6e7681'}" stroke-width="${here ? 4 : 2.5}" style="cursor:pointer" onclick="agentStats('${esc(st)}')"><title>${esc(st)}${here ? ' — potato is here now' : ''}</title></circle>`;
+        s += `<text x="${x}" y="${H/2 + 4}" text-anchor="middle" font-size="9" font-weight="700" font-family="monospace" fill="${here ? '#ffd54d' : '#8b949e'}" style="cursor:pointer" onclick="agentStats('${esc(st)}')">${esc(ini)}</text>`;
+        s += `<text x="${x}" y="${H/2 + 26}" text-anchor="middle" font-size="9" font-family="monospace" fill="${here ? '#ffd54d' : '#6e7681'}">${esc(st.length > 11 ? st.slice(0,10) + '…' : st)}</text>`;
       });
       s += '</svg>';
       return s;
