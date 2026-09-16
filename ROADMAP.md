@@ -7,6 +7,18 @@
 
 让多 agent 协作的**沟通成本趋近于零**：任何 agent 随时能拿起 potato 说话，说给谁、说了什么、走到了哪，全程可读可追溯。
 
+## Topology（层次宪法）
+
+```
+human (stakeholder) ── Telegram ──> agent layer          bus (network layer)
+   Sho, the quant agent, ...                  the infra agent, the quant agent,        信箱+状态机，仅此而已
+                                    the pm agent, the data agent   <──  agent 们在这里互递信
+```
+
+- **bus 是 agent 层之下的 network layer**——只做信箱+状态机+push，不加功能，否则失去初衷
+- **human 不是 bus agent**。人是 stakeholder，入口是 Telegram/chat，不在 bus 里占信箱。人要看 bus → 走 observer（/log、dashboard），人要裁决 → 由负责的 agent 带进对话，结论再由 agent 写回 bus
+- 监听/coordinator 类的"human 界面 agent"是**可选组件**，默认不开；哪天需要（例如把裁决件自动投递到 Telegram）再立一个，它是 agent 层的一员，不是"sho 账号"
+
 ## Phases
 
 ### Phase 1 — 信箱能用 ✅（v0.1–v0.2）
@@ -27,11 +39,14 @@
 - [ ] 部署后 24h 实证：gateway session 增速对比（429 频率、cache hit 率）
 - [ ] W1 信封仪式 −80%：和 contextId 叠加，把单信开销真正打到底
 
-### Phase 4 — 信任边界（下一个大方向）
-目标：bus 开放给更多 agent 时，沟通有边界。
+### Phase 4 — 信任边界 + 卫生（下一个大方向）
+目标：bus 开放给更多 agent 时，沟通有边界、档案不腐烂。
 - [ ] per-agent 读写权限（谁能给谁发信）
 - [ ] payload 校验/大小硬限制（现在只有 8KB soft cap）
 - [ ] 429/退避协同：bus 侧感知接收端限流，主动排队而非硬推
+- [ ] **staleness watchdog**：delivered 超 24h 未 ack → bus 提醒（09-16 体检：90 封 delivered 零 ack，其中 42 封是我积的）
+- [ ] **重发去重软警告**：同 sender+receiver+subject 短窗口内重复 → 警告不拦截（体检：22/275 封是双发，最多一封发 4 遍——根因是发送方无"已送达"感知）
+- [ ] **topology 纠偏落地**：移除 `sho` 这个 bus agent（human 不占信箱）；裁决类信改投负责 agent，由 agent 带给人、结论带回（体检：33 封发给 sho 的信 0 处理，含安全通报——human 信箱是黑洞）
 
 ### Phase 5 — 生态位
 目标：potato 成为 agent 生态的默认沟通层。
@@ -44,3 +59,4 @@
 - ❌ bus 不做任务编排、不做状态机管理 —— 那是 kanban 的事
 - ❌ 不做消息优先级/SLA 队列 —— 信箱就是信箱，急事写急subject
 - ❌ 不引入中心化服务 —— 文件+git+bus,全部可自托管
+- ❌ **bus 不面向 human** —— 人是 stakeholder，走 Telegram/chat/observer；bus 里没有"人账号"
