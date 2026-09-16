@@ -229,6 +229,15 @@ impl BusStore for InMemoryStore {
         Ok(())
     }
 
+    async fn unregister(&self, agent: &str) -> BusResult<()> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        inner.agents.retain(|a| a != agent);
+        // The mailbox itself is intentionally KEPT: letters already on the
+        // shelf must stay visible (observer view / audit), exactly like the
+        // sled backend, which only drops the __agent__:: marker.
+        Ok(())
+    }
+
     async fn agents(&self) -> BusResult<Vec<String>> {
         let inner = self.inner.read().expect("store poisoned");
         Ok(inner.agents.clone())

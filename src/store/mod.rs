@@ -63,6 +63,14 @@ pub trait BusStore: Send + Sync {
     /// Register an agent (mailbox comes into existence). Idempotent.
     async fn register(&self, agent: &str) -> BusResult<()>;
 
+    /// Remove an agent's mailbox marker (topology correction, 2026-09-16:
+    /// human ≠ bus agent). Letters addressed to them are NOT deleted — they
+    /// stay visible to the observer view and the queue sweeper skips them
+    /// (no push entry). Default: no-op for backends without agent markers.
+    async fn unregister(&self, _agent: &str) -> BusResult<()> {
+        Ok(())
+    }
+
     /// Known agents.
     async fn agents(&self) -> BusResult<Vec<String>>;
 

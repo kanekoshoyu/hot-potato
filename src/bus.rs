@@ -42,6 +42,16 @@ impl EventBus {
         Ok(())
     }
 
+    /// Drop an agent from the bus (topology correction, 2026-09-16: human ≠
+    /// bus agent). Removes the role + mailbox registration; letters already
+    /// addressed to them stay in the store (observer view / audit) and the
+    /// queue sweeper skips them since the push registry entry is gone.
+    pub async fn unregister(&self, agent: &str) -> BusResult<()> {
+        self.store.unregister(agent).await?;
+        self.roles.write().await.remove(agent);
+        Ok(())
+    }
+
     /// Hot potato: write the letter and let go. Returns the id to track.
     pub async fn send(
         &self,

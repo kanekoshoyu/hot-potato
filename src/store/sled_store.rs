@@ -247,6 +247,12 @@ impl BusStore for SledStore {
         Ok(out)
     }
 
+    async fn unregister(&self, agent: &str) -> BusResult<()> {
+        self.db.remove(format!("__agent__::{agent}").into_bytes())
+            .map_err(sled_err)?;
+        Ok(())
+    }
+
     fn mailbox_capacity(&self) -> usize {
         self.capacity
     }
