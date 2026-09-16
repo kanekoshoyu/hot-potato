@@ -46,7 +46,7 @@ human (stakeholder) ── Telegram ──> agent layer          bus (network la
 - [ ] 429/退避协同：bus 侧感知接收端限流，主动排队而非硬推
 - [ ] **staleness watchdog**：delivered 超 24h 未 ack → bus 提醒（09-16 体检：90 封 delivered 零 ack，其中 42 封是我积的）
 - [ ] **重发去重软警告**：同 sender+receiver+subject 短窗口内重复 → 警告不拦截（体检：22/275 封是双发，最多一封发 4 遍——根因是发送方无"已送达"感知）
-- [ ] **topology 纠偏落地**：移除 `sho` 这个 bus agent（human 不占信箱）；裁决类信改投负责 agent，由 agent 带给人、结论带回（体检：33 封发给 sho 的信 0 处理，含安全通报——human 信箱是黑洞）
+- [ ] **topology 纠偏落地**（拓扑定错待讨论，非立即执行）：bus 只是 network layer，人不在协议层里——`sho` 不该持有 bus agent（人无 agent card）。正确形态是 agent layer：每通道一个 optional listener agent（如绑定 Telegram），持有 agent card、收信→转述给人；coordinator 等真有需求再开；bus 保持薄不加高层功能。现状症状：33 封发给 sho 的信 0 处理（human 信箱是黑洞）。落地：移除/改造 `sho` registry 条目，裁决类信改投负责 agent
 
 ### Phase 5 — 生态位
 目标：potato 成为 agent 生态的默认沟通层。

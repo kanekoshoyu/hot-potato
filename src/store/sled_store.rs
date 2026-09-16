@@ -160,6 +160,10 @@ impl BusStore for SledStore {
             MessageStatus::Acked => Ok(()), // idempotent re-ack
             _ => {
                 validate_ack(m)?;
+                // v1.2.1: never skip the read station — see memory.rs ack().
+                if m.read_at.is_none() {
+                    m.read_at = Some(chrono::Utc::now());
+                }
                 m.status = MessageStatus::Acked;
                 m.acked_at = Some(chrono::Utc::now());
                 m.ack_note = Some(note.chars().take(80).collect());
@@ -305,6 +309,19 @@ mod tests {
         let acked = s.ack("the quant agent", &m.id, "done").await.unwrap();
         assert_eq!(acked.status, MessageStatus::Acked);
         assert_eq!(s.archive().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ack_from_delivered_stamps_read_at_on_sled() {
+        let s = store().await;
+        let m = Message::new("the pm agent", "the quant agent", MsgType::Task, "T", "b", None);
+        s.push(&m).await.unwrap();
+        s.mark_delivered("the quant agent", &m.id).await.unwrap();
+        let out = s.ack("the quant agent", &m.id, "skipped read").await.unwrap();
+        assert!(
+            out.read_at.is_some(),
+            "sled: ack from delivered must auto-stamp read_at"
+        );
     }
 
     #[tokio::test]

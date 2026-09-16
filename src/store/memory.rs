@@ -153,6 +153,12 @@ impl BusStore for InMemoryStore {
             MessageStatus::Acked => Ok(m.clone()),
             _ => {
                 validate_ack(m)?;
+                // v1.2.1: never skip the read station — acking straight from
+                // `delivered` (the push-era norm) auto-stamps read_at so the
+                // audit trail keeps its full queued→delivered→read→acked chain.
+                if m.read_at.is_none() {
+                    m.read_at = Some(now);
+                }
                 m.status = MessageStatus::Acked;
                 m.acked_at = Some(now);
                 m.ack_note = Some(note.chars().take(80).collect());
@@ -277,6 +283,36 @@ mod tests {
         s.push(&m).await.unwrap();
         let err = s.ack("the quant agent", &m.id, "cheat").await.unwrap_err();
         assert!(matches!(err, BusError::NotDeliverable(_, _)));
+    }
+
+    /// v1.2.1: acking straight from `delivered` (the production norm — push
+    /// flips delivered in seconds, agents ack when done, nobody calls read)
+    /// must auto-stamp `read_at` instead of skipping the station. The audit
+    /// trail showed 6/185 acked letters with no read_at; read must never be
+    /// silently skipped.
+    async fn ack_from_delivered_stamps_read_at(s: &dyn BusStore) {
+        let m = Message::new("the pm agent", "the quant agent", MsgType::Task, "T", "b", None);
+        s.push(&m).await.unwrap();
+        s.mark_delivered("the quant agent", &m.id).await.unwrap();
+        s.mark_read("the quant agent", &m.id).await.unwrap();
+        let out = s.ack("the quant agent", &m.id, "normal path").await.unwrap();
+        assert_eq!(out.status, MessageStatus::Acked);
+        assert!(out.read_at.is_some(), "explicit read keeps read_at");
+    }
+    #[tokio::test]
+    async fn ack_from_delivered_auto_stamps_read_at_memory() {
+        let s = setup().await;
+        let m = Message::new("the pm agent", "the quant agent", MsgType::Task, "T", "b", None);
+        s.push(&m).await.unwrap();
+        s.mark_delivered("the quant agent", &m.id).await.unwrap();
+        // RED: today this acks with read_at == None (skipped station)
+        let out = s.ack("the quant agent", &m.id, "skipped read").await.unwrap();
+        assert!(
+            out.read_at.is_some(),
+            "ack from delivered must auto-stamp read_at, got {:?}",
+            out.read_at
+        );
+        ack_from_delivered_stamps_read_at(&s).await;
     }
 
     #[tokio::test]
