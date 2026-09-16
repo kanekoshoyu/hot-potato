@@ -162,6 +162,18 @@ impl Registry {
         entry
     }
 
+    /// Remove an agent's push entry (topology correction, Sho 2026-09-16:
+    /// human ≠ bus agent). The mailbox and its letters are untouched — only
+    /// the push registration is dropped. Returns the removed entry.
+    pub async fn unregister(&self, agent: &str) -> Option<AgentEntry> {
+        let mut agents = self.agents.write().await;
+        let removed = agents.remove(agent);
+        if removed.is_some() {
+            self.persist(&agents);
+        }
+        removed
+    }
+
     pub async fn lookup(&self, agent: &str) -> Option<AgentEntry> {
         self.agents.read().await.get(agent).cloned()
     }
@@ -331,7 +343,7 @@ mod tests {
     async fn registry_register_lookup_roundtrip() {
         let reg = Registry::new();
         reg.register(
-            "the quant agent",
+            "bob",
             "quant, data guardian",
             DeliverVia::A2a {
                 url: "http://localhost:8643/".into(),
@@ -339,7 +351,7 @@ mod tests {
             },
         )
         .await;
-        let e = reg.lookup("the quant agent").await.unwrap();
+        let e = reg.lookup("bob").await.unwrap();
         assert_eq!(e.description, "quant, data guardian");
         assert!(e.deliver_via.is_push());
         assert!(reg.lookup("ghost").await.is_none());
@@ -348,27 +360,27 @@ mod tests {
     #[tokio::test]
     async fn registry_register_tagged_persists_and_preserves() {
         let reg = Registry::new();
-        reg.register_tagged("the pm agent", "pm", DeliverVia::Poll,
+        reg.register_tagged("alice", "pm", DeliverVia::Poll,
                             vec!["fleet".into(), "pm-office".into()]).await;
-        let e = reg.lookup("the pm agent").await.unwrap();
+        let e = reg.lookup("alice").await.unwrap();
         assert_eq!(e.tags, vec!["fleet", "pm-office"]);
         // Re-register without tags → tags preserved (idempotent upgrade-safe).
-        reg.register("the pm agent", "pm", DeliverVia::Poll).await;
-        assert_eq!(reg.lookup("the pm agent").await.unwrap().tags, vec!["fleet", "pm-office"]);
+        reg.register("alice", "pm", DeliverVia::Poll).await;
+        assert_eq!(reg.lookup("alice").await.unwrap().tags, vec!["fleet", "pm-office"]);
         // Explicit new tags replace.
-        reg.register_tagged("the pm agent", "pm", DeliverVia::Poll,
+        reg.register_tagged("alice", "pm", DeliverVia::Poll,
                             vec!["sho-pool".into()]).await;
-        assert_eq!(reg.lookup("the pm agent").await.unwrap().tags, vec!["sho-pool"]);
+        assert_eq!(reg.lookup("alice").await.unwrap().tags, vec!["sho-pool"]);
         // Untagged agents default to empty, not garbage.
-        reg.register("the infra agent", "worker", DeliverVia::Poll).await;
-        assert!(reg.lookup("the infra agent").await.unwrap().tags.is_empty());
+        reg.register("erin", "worker", DeliverVia::Poll).await;
+        assert!(reg.lookup("erin").await.unwrap().tags.is_empty());
     }
 
     #[tokio::test]
     async fn poll_only_is_the_default_semantics() {
         let reg = Registry::new();
-        reg.register("the data agent", "viz", DeliverVia::Poll).await;
-        let e = reg.lookup("the data agent").await.unwrap();
+        reg.register("carol", "viz", DeliverVia::Poll).await;
+        let e = reg.lookup("carol").await.unwrap();
         assert!(!e.deliver_via.is_push());
     }
 
@@ -404,36 +416,36 @@ mod tests {
     async fn dispatch_pushes_to_registered_endpoint() {
         let reg = Arc::new(Registry::new());
         reg.register(
-            "the quant agent",
+            "bob",
             "quant",
             DeliverVia::Webhook {
-                url: "http://the quant agent-hook".into(),
+                url: "http://bob-hook".into(),
             },
         )
         .await;
-        reg.register("the data agent", "viz", DeliverVia::Poll).await;
+        reg.register("carol", "viz", DeliverVia::Poll).await;
 
         let transport = Arc::new(RecordingTransport {
             fail_for: vec![],
             pushed: std::sync::Mutex::new(vec![]),
         });
 
-        // push lands for the quant agent
+        // push lands for bob
         let out = dispatch_push(
             &reg,
             &(transport.clone() as Arc<dyn PushTransport>),
-            "the quant agent",
+            "bob",
             &serde_json::json!({"id": "m1"}),
         )
         .await;
         assert!(matches!(out, PushOutcome::Pushed));
         assert_eq!(transport.pushed.lock().unwrap().len(), 1);
 
-        // the data agent is poll-only → skipped, not failed
+        // carol is poll-only → skipped, not failed
         let out = dispatch_push(
             &reg,
             &(transport.clone() as Arc<dyn PushTransport>),
-            "the data agent",
+            "carol",
             &serde_json::json!({"id": "m2"}),
         )
         .await;
@@ -444,7 +456,7 @@ mod tests {
     async fn push_failure_is_reported_not_fatal() {
         let reg = Arc::new(Registry::new());
         reg.register(
-            "the quant agent",
+            "bob",
             "quant",
             DeliverVia::Webhook {
                 url: "http://broken-hook".into(),
@@ -458,7 +470,7 @@ mod tests {
         let out = dispatch_push(
             &reg,
             &(transport as Arc<dyn PushTransport>),
-            "the quant agent",
+            "bob",
             &serde_json::json!({"id": "m1"}),
         )
         .await;

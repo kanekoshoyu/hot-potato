@@ -9,7 +9,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MsgType {
-    /// A task assignment (the PM agent -> the quant agent).
+    /// A task assignment.
     Task,
     /// A reply threading on a previous message (`ref` must be set).
     Reply,
@@ -118,10 +118,10 @@ mod tests {
 
     #[test]
     fn new_message_starts_queued() {
-        let m = Message::new("the pm agent", "the quant agent", MsgType::Task, "do X", "body", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "do X", "body", None);
         assert_eq!(m.status, MessageStatus::Queued);
         assert!(m.delivered_at.is_none());
-        assert_eq!(m.sender, "the pm agent");
+        assert_eq!(m.sender, "alice");
     }
 
     #[test]

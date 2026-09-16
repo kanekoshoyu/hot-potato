@@ -22,6 +22,7 @@ pub mod message;
 pub mod openapi;
 pub mod server;
 pub mod store;
+pub mod sweeper;
 pub mod ws;
 
 pub use bus::EventBus;

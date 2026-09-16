@@ -99,7 +99,7 @@ pub fn openapi_doc() -> OpenApi {
                             .example(Some(serde_json::json!({
                                 "jsonrpc":"2.0","id":1,
                                 "method":"message/send",
-                                "params":{"sender":"the pm agent","receiver":"the quant agent",
+                                "params":{"sender":"alice","receiver":"bob",
                                           "type":"task","subject":"run X","body":"see /path"}
                             })))
                             .build(),

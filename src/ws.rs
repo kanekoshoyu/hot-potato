@@ -219,8 +219,8 @@ mod tests {
         let mut rx1 = hub.tx.subscribe();
         let mut rx2 = hub.tx.subscribe();
         let msg = Message::new(
-            "the pm agent",
-            "the quant agent",
+            "alice",
+            "bob",
             crate::message::MsgType::Task,
             "t",
             "b",
@@ -236,8 +236,8 @@ mod tests {
         let hub = EventHub::new();
         let mut rx = hub.tx.subscribe();
         let msg = Message::new(
-            "the pm agent",
-            "the quant agent",
+            "alice",
+            "bob",
             crate::message::MsgType::Task,
             "run X",
             "b",
@@ -247,7 +247,7 @@ mod tests {
         let ev = rx.recv().await.unwrap();
         let j = ev.to_json();
         assert_eq!(j["event"], "delivered");
-        assert_eq!(j["receiver"], "the quant agent");
+        assert_eq!(j["receiver"], "bob");
         assert!(j["at"].is_string());
     }
 }

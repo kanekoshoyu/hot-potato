@@ -131,7 +131,7 @@ struct RpcRequest {
 async fn discover() -> Value {
     json!({
         "methods": [
-            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus (optional: description, deliver_via, tags[])"},
+            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus (optional: description, deliver_via, tags[])"},{"name":"agent/unregister","params":["agent"],"desc":"remove an agent from the bus — human ≠ bus agent; mailbox letters stay observable (1.2.3)"},
             {"name":"message/send","params":["sender","receiver","type (task|reply|broadcast|ack_only)","subject","body","ref (required for reply)"],"desc":"pass a potato"},
             {"name":"message/poll","params":["agent","limit (optional, 0=all)"],"desc":"drain my mailbox; marks returned letters delivered (poll = claim)"},
             {"name":"message/peek","params":["agent"],"desc":"look without marking (queued letters only)"},
@@ -259,7 +259,7 @@ async fn rpc(
                             })
                         })
                         .map_err(|e| e.to_string());
-                    // Re-push on register (the PM agent find A, 2026-09-12): queued
+                    // Re-push on register (2026-09-12): queued
                     // letters sent while the receiver had no live push transport
                     // (unregistered / poll-only / endpoint down) never get a
                     // second dispatch — recovery was poll-only. Now every fresh
@@ -298,6 +298,30 @@ async fn rpc(
                         }
                     });
                     out
+                }
+            })
+            .await
+        }
+        "agent/unregister" => {
+            // Topology correction (Sho, 2026-09-16): human ≠ bus agent — the
+            // `sho` mailbox was a black hole (poll-type entry, nobody polls).
+            // Removes the push registry entry + bus registration; letters
+            // already on the shelf stay observable (never deleted).
+            parse1(&req.params, "agent", |agent| {
+                let agent = agent.to_string();
+                let registry = registry.clone();
+                let bus = bus.clone();
+                async move {
+                    let removed = registry.unregister(&agent).await;
+                    bus.unregister(&agent)
+                        .await
+                        .map(|_| {
+                            json!({
+                                "unregistered": agent,
+                                "had_push_entry": removed.is_some(),
+                            })
+                        })
+                        .map_err(|e| e.to_string())
                 }
             })
             .await
@@ -1203,6 +1227,10 @@ pub fn router(
         _ => crate::handshake::DynamicPeers::new(),
     };
     let card = config.agent_card();
+    // Queue sweeper (2026-09-16): self-healing re-dispatch of queued
+    // letters. Enabled via HOT_POTATO_SWEEP_PERIOD_SECS; unset = off, so tests
+    // and bare local runs see no background side effects.
+    crate::sweeper::spawn_if_enabled(bus.clone(), registry.clone(), Arc::new(crate::deliver::HttpTransport::new()), hub.clone());
     let app = crate::ws::router()
         .route("/", get(dashboard).post(rpc))
         .route("/log", get(log_page))
@@ -1247,9 +1275,9 @@ mod tests {
 
     async fn test_bus() -> Arc<EventBus> {
         let bus = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
-        bus.register("the pm agent", Role::Pm).await.unwrap();
-        bus.register("the quant agent", Role::Worker).await.unwrap();
-        bus.register("the data agent", Role::Worker).await.unwrap();
+        bus.register("alice", Role::Pm).await.unwrap();
+        bus.register("bob", Role::Worker).await.unwrap();
+        bus.register("carol", Role::Worker).await.unwrap();
         bus
     }
 
@@ -1315,7 +1343,7 @@ mod tests {
             a,
             "message/send",
             json!({
-                "sender":"the pm agent","receiver":"the quant agent","type":"task",
+                "sender":"alice","receiver":"bob","type":"task",
                 "subject":"run X","body":"b"
             }),
         )
@@ -1324,7 +1352,7 @@ mod tests {
         let id = res["result"]["id"].as_str().unwrap().to_string();
 
         // poll (new router instance shares the bus)
-        let res = rpc_call(app(bus.clone()), "message/poll", json!({"agent":"the quant agent"})).await;
+        let res = rpc_call(app(bus.clone()), "message/poll", json!({"agent":"bob"})).await;
         assert!(res.get("result").is_some(), "poll failed: {res}");
         assert_eq!(res["result"].as_array().unwrap().len(), 1);
 
@@ -1332,7 +1360,7 @@ mod tests {
         let res = rpc_call(
             app(bus.clone()),
             "message/read",
-            json!({"agent":"the quant agent","id":id}),
+            json!({"agent":"bob","id":id}),
         )
         .await;
         assert_eq!(res["result"]["status"], "read");
@@ -1341,7 +1369,7 @@ mod tests {
         let res = rpc_call(
             app(bus.clone()),
             "message/ack",
-            json!({"agent":"the quant agent","id":id,"note":"done"}),
+            json!({"agent":"bob","id":id,"note":"done"}),
         )
         .await;
         assert_eq!(res["result"]["status"], "acked");
@@ -1350,7 +1378,7 @@ mod tests {
         let res = rpc_call(
             app(bus.clone()),
             "agent/status",
-            json!({"agent":"the pm agent"}),
+            json!({"agent":"alice"}),
         )
         .await;
         let arr = res["result"].as_array().unwrap();
@@ -1368,7 +1396,7 @@ mod tests {
             a,
             "message/send",
             json!({
-                "sender":"the pm agent","receiver":"the quant agent","type":"task",
+                "sender":"alice","receiver":"bob","type":"task",
                 "subject":"one","body":"b"
             }),
         )
@@ -1378,7 +1406,7 @@ mod tests {
             app(bus.clone()),
             "message/send",
             json!({
-                "sender":"the pm agent","receiver":"the quant agent","type":"task",
+                "sender":"alice","receiver":"bob","type":"task",
                 "subject":"two","body":"b"
             }),
         )
@@ -1397,7 +1425,7 @@ mod tests {
         let _ = rpc_call(
             app(bus.clone()),
             "message/poll",
-            json!({"agent":"the quant agent","limit":1}),
+            json!({"agent":"bob","limit":1}),
         )
         .await;
         let res = rpc_call(
@@ -1419,7 +1447,7 @@ mod tests {
             a,
             "message/send",
             json!({
-                "sender":"the pm agent","receiver":"the quant agent","type":"task",
+                "sender":"alice","receiver":"bob","type":"task",
                 "subject":"hello log","body":"b"
             }),
         )
@@ -1445,7 +1473,7 @@ mod tests {
             text.contains("hello log"),
             "log page missing subject: {text}"
         );
-        assert!(text.contains("the pm agent"));
+        assert!(text.contains("alice"));
         assert!(content_type.starts_with("text/plain"));
     }
 
@@ -1526,12 +1554,12 @@ mod tests {
 
     // --- RFC-004: bus federation ------------------------------------------- //
 
-    /// A bus app that routes `the quant agent` to a fake peer at 127.0.0.1:1
+    /// A bus app that routes `bob` to a fake peer at 127.0.0.1:1
     /// (connection refused — deterministic "peer down").
     fn fed_app_down_peer(bus: Arc<EventBus>) -> Router {
         let peers = crate::federation::Peers::from_json(
             r#"[{"name":"fleet","url":"http://127.0.0.1:1","token":"x",
-                 "agents":["the quant agent"]}]"#,
+                 "agents":["bob"]}]"#,
         )
         .unwrap();
         let cfg = Arc::new(ServerConfig {
@@ -1554,7 +1582,7 @@ mod tests {
         let res = rpc_call(
             fed_app_down_peer(bus.clone()),
             "message/send",
-            json!({"sender":"the pm agent","receiver":"the quant agent","type":"task",
+            json!({"sender":"alice","receiver":"bob","type":"task",
                    "subject":"cross pool","body":"b"}),
         )
         .await;
@@ -1570,13 +1598,13 @@ mod tests {
         let res = rpc_call(
             fed_app_down_peer(bus.clone()),
             "message/send",
-            json!({"sender":"the pm agent","receiver":"the data agent","type":"task",
+            json!({"sender":"alice","receiver":"carol","type":"task",
                    "subject":"local one","body":"b"}),
         )
         .await;
         assert!(res.get("result").is_some(), "local send failed: {res}");
         assert!(res["result"]["forwarded"].is_null());
-        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"the data agent"})).await;
+        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"carol"})).await;
         assert_eq!(peek["result"].as_array().unwrap().len(), 1);
     }
 
@@ -1598,7 +1626,7 @@ mod tests {
         let a = router(bus.clone(), cfg, test_sessions());
 
         let body = json!({"jsonrpc":"2.0","id":1,"method":"message/send",
-            "params":{"sender":"the pm agent","receiver":"the data agent","type":"task",
+            "params":{"sender":"alice","receiver":"carol","type":"task",
                       "subject":"x","body":"b"}});
         // federated header WITHOUT token → rejected
         let res = a
@@ -1633,7 +1661,7 @@ mod tests {
 
         // full envelope → accepted, remote sender auto-registered
         let body = json!({"jsonrpc":"2.0","id":2,"method":"message/send",
-            "params":{"sender":"the pm agent","receiver":"the data agent","type":"task",
+            "params":{"sender":"alice","receiver":"carol","type":"task",
                       "subject":"cross-pool hi","body":"b",
                       "hops":1,"forwarded_from":"fleet"}});
         let res = a
@@ -1652,11 +1680,11 @@ mod tests {
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["result"]["forwarded"], true);
 
-        // the letter landed in the data agent's mailbox with the envelope intact
-        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"the data agent"})).await;
+        // the letter landed in carol's mailbox with the envelope intact
+        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"carol"})).await;
         let arr = peek["result"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["sender"], "the pm agent");
+        assert_eq!(arr[0]["sender"], "alice");
         assert_eq!(arr[0]["forwarded_from"], "fleet");
         assert_eq!(arr[0]["hops"], 1);
     }
@@ -1677,7 +1705,7 @@ mod tests {
         });
         let a = router(bus, cfg, test_sessions());
         let body = json!({"jsonrpc":"2.0","id":1,"method":"message/send",
-            "params":{"sender":"the pm agent","receiver":"the data agent","type":"task",
+            "params":{"sender":"alice","receiver":"carol","type":"task",
                       "subject":"loop","body":"b","hops":9,"forwarded_from":"fleet"}});
         let res = a
             .oneshot(
@@ -1698,17 +1726,17 @@ mod tests {
     #[tokio::test]
     async fn federation_end_to_end_two_real_buses() {
         // The real thing: two in-process buses wired to each other over HTTP.
-        // Pool A (sho): the pm agent local, the quant agent routed to pool B.
-        // Pool B (fleet): the quant agent local, receives over HTTP from pool A.
+        // Pool A (sho): alice local, bob routed to pool B.
+        // Pool B (fleet): bob local, receives over HTTP from pool A.
         use tokio::net::TcpListener;
 
         let bus_a = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
-        bus_a.register("the pm agent", Role::Pm).await.unwrap();
+        bus_a.register("alice", Role::Pm).await.unwrap();
         let l_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr_a = l_a.local_addr().unwrap();
 
         let bus_b = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
-        bus_b.register("the quant agent", Role::Worker).await.unwrap();
+        bus_b.register("bob", Role::Worker).await.unwrap();
         let l_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr_b = l_b.local_addr().unwrap();
         let cfg_b = Arc::new(ServerConfig {
@@ -1726,7 +1754,7 @@ mod tests {
         // Point A's routing at B (real addr), then serve both.
         let peers_a = crate::federation::Peers::from_json(&format!(
             r#"[{{"name":"fleet","url":"http://{addr_b}","token":"shared-secret",
-                 "agents":["the quant agent"]}}]"#
+                 "agents":["bob"]}}]"#
         ))
         .unwrap();
 
@@ -1751,14 +1779,14 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-        // the infra agent-side agent (a client of pool A) sends to the quant agent (pool B)
+        // erin-side agent (a client of pool A) sends to bob (pool B)
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("http://{addr_a}"))
             .bearer_auth("shared-secret")
             .json(&json!({
                 "jsonrpc":"2.0","id":1,"method":"message/send",
-                "params":{"sender":"the pm agent","receiver":"the quant agent","type":"task",
+                "params":{"sender":"alice","receiver":"bob","type":"task",
                           "subject":"fed e2e","body":"across pools!"}
             }))
             .send()
@@ -1769,19 +1797,19 @@ mod tests {
         assert_eq!(v["result"]["forwarded"], true);
         assert_eq!(v["result"]["to_pool"], "fleet");
 
-        // the quant agent polls her LOCAL bus on pool B and finds the letter
+        // bob polls her LOCAL bus on pool B and finds the letter
         let resp = client
             .post(format!("http://{addr_b}"))
             .bearer_auth("shared-secret")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"message/poll",
-                          "params":{"agent":"the quant agent"}}))
+                          "params":{"agent":"bob"}}))
             .send()
             .await
             .unwrap();
         let v: Value = resp.json().await.unwrap();
         let letters = v["result"].as_array().unwrap();
         assert_eq!(letters.len(), 1);
-        assert_eq!(letters[0]["sender"], "the pm agent");
+        assert_eq!(letters[0]["sender"], "alice");
         assert_eq!(letters[0]["subject"], "fed e2e");
         assert_eq!(letters[0]["forwarded_from"], "sho");
         assert_eq!(letters[0]["hops"], 1);
