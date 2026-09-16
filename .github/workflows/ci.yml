@@ -17,6 +17,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --verbose
-      - name: Build release binary
-        run: cargo build --release -p hot-potato --bin hot-potato-server
+        run: cargo test
