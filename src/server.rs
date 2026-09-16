@@ -131,7 +131,7 @@ struct RpcRequest {
 async fn discover() -> Value {
     json!({
         "methods": [
-            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus (optional: description, deliver_via, tags[])"},
+            {"name":"agent/register","params":["agent","role (pm|worker)"],"desc":"register an agent on the bus (optional: description, deliver_via, tags[])"},{"name":"agent/unregister","params":["agent"],"desc":"remove an agent from the bus — human ≠ bus agent; mailbox letters stay observable (1.2.3)"},
             {"name":"message/send","params":["sender","receiver","type (task|reply|broadcast|ack_only)","subject","body","ref (required for reply)"],"desc":"pass a potato"},
             {"name":"message/poll","params":["agent","limit (optional, 0=all)"],"desc":"drain my mailbox; marks returned letters delivered (poll = claim)"},
             {"name":"message/peek","params":["agent"],"desc":"look without marking (queued letters only)"},
@@ -298,6 +298,30 @@ async fn rpc(
                         }
                     });
                     out
+                }
+            })
+            .await
+        }
+        "agent/unregister" => {
+            // Topology correction (Sho, 2026-09-16): human ≠ bus agent — the
+            // `sho` mailbox was a black hole (poll-type entry, nobody polls).
+            // Removes the push registry entry + bus registration; letters
+            // already on the shelf stay observable (never deleted).
+            parse1(&req.params, "agent", |agent| {
+                let agent = agent.to_string();
+                let registry = registry.clone();
+                let bus = bus.clone();
+                async move {
+                    let removed = registry.unregister(&agent).await;
+                    bus.unregister(&agent)
+                        .await
+                        .map(|_| {
+                            json!({
+                                "unregistered": agent,
+                                "had_push_entry": removed.is_some(),
+                            })
+                        })
+                        .map_err(|e| e.to_string())
                 }
             })
             .await
@@ -1203,6 +1227,10 @@ pub fn router(
         _ => crate::handshake::DynamicPeers::new(),
     };
     let card = config.agent_card();
+    // Queue sweeper (Patricia, 2026-09-16): self-healing re-dispatch of queued
+    // letters. Enabled via HOT_POTATO_SWEEP_PERIOD_SECS; unset = off, so tests
+    // and bare local runs see no background side effects.
+    crate::sweeper::spawn_if_enabled(bus.clone(), registry.clone(), Arc::new(crate::deliver::HttpTransport::new()), hub.clone());
     let app = crate::ws::router()
         .route("/", get(dashboard).post(rpc))
         .route("/log", get(log_page))

@@ -162,6 +162,18 @@ impl Registry {
         entry
     }
 
+    /// Remove an agent's push entry (topology correction, Sho 2026-09-16:
+    /// human ≠ bus agent). The mailbox and its letters are untouched — only
+    /// the push registration is dropped. Returns the removed entry.
+    pub async fn unregister(&self, agent: &str) -> Option<AgentEntry> {
+        let mut agents = self.agents.write().await;
+        let removed = agents.remove(agent);
+        if removed.is_some() {
+            self.persist(&agents);
+        }
+        removed
+    }
+
     pub async fn lookup(&self, agent: &str) -> Option<AgentEntry> {
         self.agents.read().await.get(agent).cloned()
     }
