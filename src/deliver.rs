@@ -227,6 +227,16 @@ impl PushTransport for HttpTransport {
                 // the letter was injected and is being processed, NOT that
                 // delivery failed. (Verified live 2026-09-10: gateway journal
                 // shows the task arriving + BrokenPipe when bus gives up first.)
+                // v1.2.0: per-thread A2A `contextId` — receivers (Hermes
+                // gateway) reuse one session per thread instead of spawning a
+                // fresh session per letter. Cuts rate-limit burn + lets prompt
+                // cache hit. `letter` carries "contextId" resolved by the
+                // caller (bus layer, which can walk the ref-chain).
+                let context_id = letter
+                    .get("contextId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("bus-{}", letter.get("id").and_then(|v| v.as_str()).unwrap_or("anon")));
                 let payload = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 0,
@@ -235,6 +245,7 @@ impl PushTransport for HttpTransport {
                         "message": {
                             "messageId": format!("hp-{}", uuid::Uuid::new_v4()),
                             "role": "ROLE_USER",
+                            "contextId": context_id,
                             "parts": [{"kind": "text", "text": letter.to_string()}]
                         }
                     }

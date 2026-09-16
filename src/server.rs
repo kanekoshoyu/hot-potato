@@ -271,9 +271,16 @@ async fn rpc(
                         Arc::new(crate::deliver::HttpTransport::new());
                     tokio::spawn(async move {
                         let Ok(queued) = bus2.peek(&re_agent).await else { return };
+                        // v1.2.0: per-thread A2A contextId (rate-limit fix) —
+                        // resolve each letter's thread root once per re-push.
+                        let all = bus2.list_all().await.unwrap_or_default();
                         for letter in queued {
-                            let push_letter =
+                            let mut push_letter =
                                 serde_json::to_value(&letter).expect("letter json");
+                            push_letter["contextId"] = serde_json::json!(format!(
+                                "bus-t-{}",
+                                crate::message::Message::thread_root_id(&all, &letter.id)
+                            ));
                             let outcome = crate::deliver::dispatch_push(
                                 &registry2,
                                 &transport,
@@ -337,17 +344,13 @@ async fn rpc(
                     );
                 }
             };
-            // walk to the thread root
+            // walk to the thread root (v1.2.0: shared helper, cycle-safe —
+            // the old inline loop never re-bound `anchor`, so it could only
+            // climb one level; caught during the contextId work)
+            let root_id = crate::message::Message::thread_root_id(&all, &anchor.id);
+            // collect the thread: root + everything whose ref-chain reaches it
             let by_id: std::collections::HashMap<&str, &crate::message::Message> =
                 all.iter().map(|m| (m.id.as_str(), m)).collect();
-            let mut root_id = anchor.id.clone();
-            for _ in 0..16 {
-                match &anchor.r#ref {
-                    Some(r) if by_id.contains_key(r.as_str()) => root_id = r.clone(),
-                    _ => break,
-                }
-            }
-            // collect the thread: root + everything whose ref-chain reaches it
             let mut members: Vec<&crate::message::Message> = Vec::new();
             for m in &all {
                 let mut cur = m.id.clone();
@@ -504,7 +507,14 @@ async fn rpc(
                             let Some(letter) = stored.ok().and_then(|v| {
                                 v.into_iter().find(|m| m.id == push_id)
                             }) else { return };
-                            let push_letter = serde_json::to_value(&letter).expect("letter json");
+                            // v1.2.0: per-thread A2A contextId (rate-limit fix)
+                            let mut push_letter = serde_json::to_value(&letter).expect("letter json");
+                            if let Ok(all) = bus4.list_all().await {
+                                push_letter["contextId"] = serde_json::json!(format!(
+                                    "bus-t-{}",
+                                    crate::message::Message::thread_root_id(&all, &push_id)
+                                ));
+                            }
                             let outcome = crate::deliver::dispatch_push(
                                 &registry4, &transport, &push_receiver, &push_letter,
                             ).await;
@@ -614,6 +624,15 @@ async fn rpc(
                     let push_receiver = receiver.clone();
                     let push_id = id.clone();
                     tokio::spawn(async move {
+                        // v1.2.0: per-thread A2A contextId (rate-limit fix) —
+                        // one receiver session per thread, prompt cache hits.
+                        let mut push_letter = push_letter;
+                        if let Ok(all) = bus2.list_all().await {
+                            push_letter["contextId"] = serde_json::json!(format!(
+                                "bus-t-{}",
+                                crate::message::Message::thread_root_id(&all, &push_id)
+                            ));
+                        }
                         let outcome = crate::deliver::dispatch_push(
                             &registry,
                             &transport,

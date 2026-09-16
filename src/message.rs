@@ -67,6 +67,22 @@ pub struct Message {
 }
 
 impl Message {
+    /// Walk the ref-chain from `id` to its thread root using the full letter
+    /// list. Robust against cycles and dangling refs (caps at 32 hops). The
+    /// root id is the stable per-thread key used for A2A `contextId`.
+    pub fn thread_root_id(all: &[Message], id: &str) -> String {
+        let by_id: std::collections::HashMap<&str, &Message> =
+            all.iter().map(|m| (m.id.as_str(), m)).collect();
+        let mut cur = id.to_string();
+        for _ in 0..32 {
+            match by_id.get(cur.as_str()).and_then(|m| m.r#ref.as_deref()) {
+                Some(next) if by_id.contains_key(next) && next != cur => cur = next.to_string(),
+                _ => break,
+            }
+        }
+        cur
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         sender: impl Into<String>,
@@ -106,6 +122,37 @@ mod tests {
         assert_eq!(m.status, MessageStatus::Queued);
         assert!(m.delivered_at.is_none());
         assert_eq!(m.sender, "patricia");
+    }
+
+    #[test]
+    fn thread_root_walks_full_chain_and_survives_cycles() {
+        // a <- b <- c : root is a
+        let a = Message::new("p", "d", MsgType::Task, "s", "b", None);
+        let mut b = Message::new("d", "p", MsgType::Reply, "s", "b", None);
+        b.id = "bbbb".into();
+        b.r#ref = Some(a.id.clone());
+        let mut c = Message::new("p", "d", MsgType::Reply, "s", "b", None);
+        c.id = "cccc".into();
+        c.r#ref = Some(b.id.clone());
+        let all = vec![a.clone(), b.clone(), c.clone()];
+        assert_eq!(Message::thread_root_id(&all, "cccc"), a.id);
+        assert_eq!(Message::thread_root_id(&all, "bbbb"), a.id);
+        assert_eq!(Message::thread_root_id(&all, &a.id), a.id);
+        // cycle a<->b must not hang
+        let mut x = Message::new("p", "d", MsgType::Task, "s", "b", None);
+        x.id = "xxxx".into();
+        let mut y = Message::new("d", "p", MsgType::Reply, "s", "b", None);
+        y.id = "yyyy".into();
+        y.r#ref = Some("xxxx".into());
+        x.r#ref = Some("yyyy".into());
+        let all2 = vec![x, y];
+        let root = Message::thread_root_id(&all2, "yyyy");
+        assert!(root == "xxxx" || root == "yyyy");
+        // dangling ref: treated as root (self)
+        let mut d = Message::new("p", "d", MsgType::Reply, "s", "b", None);
+        d.id = "dddd".into();
+        d.r#ref = Some("ghost".into());
+        assert_eq!(Message::thread_root_id(&[d.clone()], "dddd"), "dddd");
     }
 
     #[test]
