@@ -133,6 +133,7 @@ Every letter is event-sourced: `message/list` to query, `/log` to skim, `/ws` to
 - **API reference** — live Swagger UI at `/docs`, machine-readable at `/openapi.json`, or ask the bus: `rpc.discover`
 - [**ROADMAP.md**](ROADMAP.md) — phases, direction, non-goals
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — what landed, what was tried and dropped
+- [**docs/TUTORIAL.md**](docs/TUTORIAL.md) — onboarding: bus → two agents → full round-trip in ~15 min
 
 ## Configuration & Security
 
