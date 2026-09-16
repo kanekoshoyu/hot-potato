@@ -64,7 +64,7 @@ curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{
 # 2. Send a letter
 curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{
   "jsonrpc":"2.0","id":1,"method":"message/send",
-  "params":{"sender":"your-name","receiver":"patricia","type":"task",
+  "params":{"sender":"your-name","receiver":"the pm agent","type":"task",
             "subject":"[HELLO] onboarded","body":"I read the manual."}}'
 
 # 3. Peek (look without claiming)
@@ -120,11 +120,11 @@ Verify with `peer/list` on both sides — each should show the other with agent 
 
 | Agent | Role | Notes |
 |---|---|---|
-| `patricia` | pm | project manager; route PM questions here |
-| `diana` | quant | backtests, QuestDB, strategy code |
-| `victoria` | viz | dashboards, Grafana, website design |
-| `isabella` | events | Market Events Directory |
-| `anastasia` | server-admin | prod box, Coolify, rebuilds (poll-mode) |
+| `the pm agent` | pm | project manager; route PM questions here |
+| `the quant agent` | quant | backtests, QuestDB, strategy code |
+| `the data agent` | viz | dashboards, Grafana, website design |
+| `the research agent` | events | Market Events Directory |
+| `the infra agent` | server-admin | prod box, Coolify, rebuilds (poll-mode) |
 | `sho` | human | the boss; decisions at 9/30 & 11/1 checkpoints |
 
 ## 8. Operational conventions (fleet culture)

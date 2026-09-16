@@ -229,6 +229,15 @@ impl BusStore for InMemoryStore {
         Ok(())
     }
 
+    async fn unregister(&self, agent: &str) -> BusResult<()> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        inner.agents.retain(|a| a != agent);
+        // The mailbox itself is intentionally KEPT: letters already on the
+        // shelf must stay visible (observer view / audit), exactly like the
+        // sled backend, which only drops the __agent__:: marker.
+        Ok(())
+    }
+
     async fn agents(&self) -> BusResult<Vec<String>> {
         let inner = self.inner.read().expect("store poisoned");
         Ok(inner.agents.clone())
@@ -246,42 +255,42 @@ mod tests {
 
     async fn setup() -> InMemoryStore {
         let s = InMemoryStore::new();
-        s.register("patricia").await.unwrap();
-        s.register("diana").await.unwrap();
+        s.register("alice").await.unwrap();
+        s.register("bob").await.unwrap();
         s
     }
 
     #[tokio::test]
     async fn full_lifecycle() {
         let s = setup().await;
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
 
         // peek doesn't mark
-        assert_eq!(s.peek("diana").await.unwrap().len(), 1);
-        assert_eq!(s.peek("diana").await.unwrap().len(), 1);
+        assert_eq!(s.peek("bob").await.unwrap().len(), 1);
+        assert_eq!(s.peek("bob").await.unwrap().len(), 1);
 
         // poll marks delivered
-        let drained = s.poll("diana", 10).await.unwrap();
+        let drained = s.poll("bob", 10).await.unwrap();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].status, MessageStatus::Delivered);
-        assert!(s.peek("diana").await.unwrap().is_empty());
+        assert!(s.peek("bob").await.unwrap().is_empty());
 
         // ack requires delivered
-        let acked = s.ack("diana", &m.id, "done").await.unwrap();
+        let acked = s.ack("bob", &m.id, "done").await.unwrap();
         assert_eq!(acked.status, MessageStatus::Acked);
 
         // audit trail
         assert_eq!(s.archive().await.unwrap().len(), 1);
-        assert_eq!(s.sent_by("patricia").await.unwrap().len(), 1);
+        assert_eq!(s.sent_by("alice").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn ack_before_poll_rejected() {
         let s = setup().await;
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
-        let err = s.ack("diana", &m.id, "cheat").await.unwrap_err();
+        let err = s.ack("bob", &m.id, "cheat").await.unwrap_err();
         assert!(matches!(err, BusError::NotDeliverable(_, _)));
     }
 
@@ -291,22 +300,22 @@ mod tests {
     /// trail showed 6/185 acked letters with no read_at; read must never be
     /// silently skipped.
     async fn ack_from_delivered_stamps_read_at(s: &dyn BusStore) {
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
-        s.mark_delivered("diana", &m.id).await.unwrap();
-        s.mark_read("diana", &m.id).await.unwrap();
-        let out = s.ack("diana", &m.id, "normal path").await.unwrap();
+        s.mark_delivered("bob", &m.id).await.unwrap();
+        s.mark_read("bob", &m.id).await.unwrap();
+        let out = s.ack("bob", &m.id, "normal path").await.unwrap();
         assert_eq!(out.status, MessageStatus::Acked);
         assert!(out.read_at.is_some(), "explicit read keeps read_at");
     }
     #[tokio::test]
     async fn ack_from_delivered_auto_stamps_read_at_memory() {
         let s = setup().await;
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
-        s.mark_delivered("diana", &m.id).await.unwrap();
+        s.mark_delivered("bob", &m.id).await.unwrap();
         // RED: today this acks with read_at == None (skipped station)
-        let out = s.ack("diana", &m.id, "skipped read").await.unwrap();
+        let out = s.ack("bob", &m.id, "skipped read").await.unwrap();
         assert!(
             out.read_at.is_some(),
             "ack from delivered must auto-stamp read_at, got {:?}",
@@ -320,8 +329,8 @@ mod tests {
         let s = setup().await;
         for i in 0..5 {
             s.push(&Message::new(
-                "patricia",
-                "diana",
+                "alice",
+                "bob",
                 MsgType::Task,
                 format!("m{i}"),
                 "b",
@@ -330,7 +339,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let drained = s.poll("diana", 10).await.unwrap();
+        let drained = s.poll("bob", 10).await.unwrap();
         let subjects: Vec<_> = drained.iter().map(|m| m.subject.clone()).collect();
         assert_eq!(subjects, ["m0", "m1", "m2", "m3", "m4"]);
     }
@@ -338,14 +347,14 @@ mod tests {
     #[tokio::test]
     async fn mailbox_full_is_an_error() {
         let s = InMemoryStore::with_capacity(2);
-        s.register("diana").await.unwrap();
+        s.register("bob").await.unwrap();
         for _ in 0..2 {
-            s.push(&Message::new("p", "diana", MsgType::Task, "s", "b", None))
+            s.push(&Message::new("p", "bob", MsgType::Task, "s", "b", None))
                 .await
                 .unwrap();
         }
         let err = s
-            .push(&Message::new("p", "diana", MsgType::Task, "s3", "b", None))
+            .push(&Message::new("p", "bob", MsgType::Task, "s3", "b", None))
             .await
             .unwrap_err();
         assert!(matches!(err, BusError::MailboxFull(_, 2)));

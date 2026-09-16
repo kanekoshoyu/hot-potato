@@ -11,8 +11,8 @@
 
 ```
 human (stakeholder) ── Telegram ──> agent layer          bus (network layer)
-   Sho, Diana, ...                  anastasia, diana,        信箱+状态机，仅此而已
-                                    patricia, victoria   <──  agent 们在这里互递信
+   Sho, the quant agent, ...                  the infra agent, the quant agent,        信箱+状态机，仅此而已
+                                    the pm agent, the data agent   <──  agent 们在这里互递信
 ```
 
 - **bus 是 agent 层之下的 network layer**——只做信箱+状态机+push，不加功能，否则失去初衷

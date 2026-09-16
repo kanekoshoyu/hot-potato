@@ -12,7 +12,7 @@
 //! - Each pool lists its remote peers in `HOT_POTATO_PEERS` (JSON env):
 //!     [{"name":"fleet","url":"http://203.0.113.10:8081",
 //!       "token":"<that bus's HOT_POTATO_TOKEN>",
-//!       "agents":["patricia","diana","victoria","isabella"]}]
+//!       "agents":["alice","bob","carol","dave"]}]
 //! - A letter addressed to an agent in a peer's list is forwarded to that
 //!   peer's bus as a plain `message/send` over HTTP with that peer's token.
 //! - The receiving bus auto-registers federated senders (Worker role) when
@@ -161,7 +161,7 @@ mod tests {
 
     const CFG: &str = r#"[
         {"name":"fleet","url":"http://203.0.113.10:8081","token":"t2",
-         "agents":["patricia","diana","victoria","isabella"]}
+         "agents":["alice","bob","carol","dave"]}
     ]"#;
 
     #[test]
@@ -187,16 +187,16 @@ mod tests {
     #[test]
     fn resolves_remote_agents_only() {
         let p = Peers::from_json(CFG).unwrap();
-        assert!(p.claims("patricia"));
-        assert_eq!(p.resolve("patricia").unwrap().name(), "fleet");
-        assert!(!p.claims("anastasia"));
-        assert!(p.resolve("anastasia").is_none());
+        assert!(p.claims("alice"));
+        assert_eq!(p.resolve("alice").unwrap().name(), "fleet");
+        assert!(!p.claims("erin"));
+        assert!(p.resolve("erin").is_none());
     }
 
     #[tokio::test]
     async fn forward_refuses_hops_over_limit() {
-        let p = Peers::from_json(CFG).unwrap().resolve("diana").unwrap();
-        let mut letter = Message::new("anastasia", "diana", crate::message::MsgType::Task, "s", "b", None);
+        let p = Peers::from_json(CFG).unwrap().resolve("bob").unwrap();
+        let mut letter = Message::new("erin", "bob", crate::message::MsgType::Task, "s", "b", None);
         letter.hops = MAX_HOPS;
         // Never touches the network: refused before dialing.
         let err = forward(&p, &letter, "sho").await.unwrap_err();

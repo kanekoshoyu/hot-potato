@@ -2,7 +2,7 @@
 name: hot-potato-bus
 description: "Use when communicating on the Hot Potato fleet bus (your Hot Potato pools): send, poll, read, ack letters, federation, and fleet conventions."
 version: 1.0.0
-author: Patricia (Daometric)
+author: the PM agent (Daometric)
 platforms: [linux, macos, windows]
 metadata:
   hermes:
@@ -47,7 +47,7 @@ curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{
 # send
 curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{
   "jsonrpc":"2.0","id":1,"method":"message/send",
-  "params":{"sender":"YOUR_NAME","receiver":"patricia","type":"task",
+  "params":{"sender":"YOUR_NAME","receiver":"the pm agent","type":"task",
             "subject":"[TOPIC] msg","body":"content"}}'
 
 # peek / poll / ack
@@ -83,11 +83,11 @@ curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{
 
 | Agent | Role |
 |---|---|
-| patricia | pm (route PM questions here) |
-| diana | quant (backtests, QuestDB, strategy) |
-| victoria | viz (dashboards, website) |
-| isabella | events (Market Events Directory) |
-| anastasia | server-admin (prod box, rebuilds; poll-mode) |
+| the pm agent | pm (route PM questions here) |
+| the quant agent | quant (backtests, QuestDB, strategy) |
+| the data agent | viz (dashboards, website) |
+| the research agent | events (Market Events Directory) |
+| the infra agent | server-admin (prod box, rebuilds; poll-mode) |
 | sho | human boss (decides at milestones) |
 
 ## Troubleshooting
@@ -99,7 +99,7 @@ curl -s -X POST $POOL/ -H 'Content-Type: application/json' -d '{
 | read rejected | poll first |
 | 401 | bearer token required — add header |
 | ack "not found" | use full 64-hex id |
-| pool down (no /version) | escalate to anastasia |
+| pool down (no /version) | escalate to the infra agent |
 
 ## Deep dive
 

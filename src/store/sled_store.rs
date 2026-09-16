@@ -247,6 +247,12 @@ impl BusStore for SledStore {
         Ok(out)
     }
 
+    async fn unregister(&self, agent: &str) -> BusResult<()> {
+        self.db.remove(format!("__agent__::{agent}").into_bytes())
+            .map_err(sled_err)?;
+        Ok(())
+    }
+
     fn mailbox_capacity(&self) -> usize {
         self.capacity
     }
@@ -265,8 +271,8 @@ mod tests {
 
     async fn store() -> Arc<SledStore> {
         let s = temp_store();
-        s.register("patricia").await.unwrap();
-        s.register("diana").await.unwrap();
+        s.register("alice").await.unwrap();
+        s.register("bob").await.unwrap();
         s
     }
 
@@ -275,10 +281,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hot-potato-persist-{}", uuid::Uuid::new_v4()));
         {
             let s = SledStore::open(&dir).unwrap();
-            s.register("diana").await.unwrap();
+            s.register("bob").await.unwrap();
             s.push(&Message::new(
-                "patricia",
-                "diana",
+                "alice",
+                "bob",
                 MsgType::Task,
                 "survive",
                 "b",
@@ -298,15 +304,15 @@ mod tests {
     #[tokio::test]
     async fn full_lifecycle_on_sled() {
         let s = store().await;
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
 
-        assert_eq!(s.peek("diana").await.unwrap().len(), 1);
-        let drained = s.poll("diana", 10).await.unwrap();
+        assert_eq!(s.peek("bob").await.unwrap().len(), 1);
+        let drained = s.poll("bob", 10).await.unwrap();
         assert_eq!(drained[0].status, MessageStatus::Delivered);
-        assert!(s.peek("diana").await.unwrap().is_empty());
+        assert!(s.peek("bob").await.unwrap().is_empty());
 
-        let acked = s.ack("diana", &m.id, "done").await.unwrap();
+        let acked = s.ack("bob", &m.id, "done").await.unwrap();
         assert_eq!(acked.status, MessageStatus::Acked);
         assert_eq!(s.archive().await.unwrap().len(), 1);
     }
@@ -314,10 +320,10 @@ mod tests {
     #[tokio::test]
     async fn ack_from_delivered_stamps_read_at_on_sled() {
         let s = store().await;
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
-        s.mark_delivered("diana", &m.id).await.unwrap();
-        let out = s.ack("diana", &m.id, "skipped read").await.unwrap();
+        s.mark_delivered("bob", &m.id).await.unwrap();
+        let out = s.ack("bob", &m.id, "skipped read").await.unwrap();
         assert!(
             out.read_at.is_some(),
             "sled: ack from delivered must auto-stamp read_at"
@@ -327,9 +333,9 @@ mod tests {
     #[tokio::test]
     async fn ack_before_poll_rejected_on_sled() {
         let s = store().await;
-        let m = Message::new("patricia", "diana", MsgType::Task, "T", "b", None);
+        let m = Message::new("alice", "bob", MsgType::Task, "T", "b", None);
         s.push(&m).await.unwrap();
-        let err = s.ack("diana", &m.id, "cheat").await.unwrap_err();
+        let err = s.ack("bob", &m.id, "cheat").await.unwrap_err();
         assert!(matches!(err, BusError::NotDeliverable(_, _)));
     }
 }

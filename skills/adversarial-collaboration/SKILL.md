@@ -1,11 +1,11 @@
 ---
 name: adversarial-collaboration
-description: Use when running the Patricia-Diana rally on Hot Potato bus.
+description: Use when running the the PM agent-the quant agent rally on Hot Potato bus.
 ---
 
 # Adversarial Collaboration — 对抗协作协议
 
-**角色**：Patricia=挑战者（challenge + 补充）；Diana=数据守护者（数据/源码/交付）。
+**角色**：the PM agent=挑战者（challenge + 补充）；the quant agent=数据守护者（数据/源码/交付）。
 **场地**：Hot Potato bus（http://localhost:8080，JSON-RPC，状态机 queued→delivered→read→acked）。
 **目标**：共同优化 trading strategy，产出可审计的结论（谁主张、谁挑战、什么存活）。
 
@@ -20,14 +20,14 @@ description: Use when running the Patricia-Diana rally on Hot Potato bus.
 
 ## 沟通纪律（Sho 规则，违反 = 流程事故）
 
-- **两步流程**：给 Diana 发任何东西前，先在 TG 给 Sho 预告（说什么/为什么）；
+- **两步流程**：给 the quant agent 发任何东西前，先在 TG 给 Sho 预告（说什么/为什么）；
   她回复后，再给 Sho "她说的 / 我的"双向汇报。
 - **查完必报**：任何分析/查询做完，立即在 TG 报账（做了什么/花了多久/产出在哪），
   报了才算完。不说“明天”，今天能做的今天做完。
-- **数据先行**：发挑战前先自查 QuestDB（Patricia 自己拉数据），带着假设去，
+- **数据先行**：发挑战前先自查 QuestDB（the PM agent 自己拉数据），带着假设去，
   不发 unsupervised prompt。
 
-## QuestDB 快速参考（Patricia 自查用）
+## QuestDB 快速参考（the PM agent 自查用）
 
 真实表名（无 smr_signals）：
 - `strategy_signal_meta_smr`：group_id / zscore / expected_return / half_life（无 expected_pnl，需 × notional 自算）
@@ -42,14 +42,14 @@ description: Use when running the Patricia-Diana rally on Hot Potato bus.
 | 事项 | Channel |
 |---|---|
 | 对抗过程（数据、假设、挑战） | bus（两 agent 之间） |
-| 每轮收网双向汇报 | Patricia TG → Sho |
-| 每日 rally 总结 | Patricia TG → Sho |
-| 报警（150/200 阈值触发） | 监控层 → Diana TG + Sho TG（bus+TG 双发） |
+| 每轮收网双向汇报 | the PM agent TG → Sho |
+| 每日 rally 总结 | the PM agent TG → Sho |
+| 报警（150/200 阈值触发） | 监控层 → the quant agent TG + Sho TG（bus+TG 双发） |
 | 审计产物（REQ doc、风险登记） | bus + smr-experiments/reports/ 落盘 |
 | config/参数 | QuestDB strategy_config（alias=config_tag） |
 
 **各 agent 回报 channel 规则**（Sho 指令：收了东西之后在各自 channel 给汇报）：
-每个 agent 用自己已建立的 TG channel 回报（Diana 有她自己的 channel/直发路径，
+每个 agent 用自己已建立的 TG channel 回报（the quant agent 有她自己的 channel/直发路径，
 same pattern applies to other observers); the human owner's single observation point = the PM agent's report channel.
 历史 channel 归属见各 agent onboarding 信；找不到时查 bus archive 的 onboarding 信。
 

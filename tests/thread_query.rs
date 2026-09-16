@@ -51,26 +51,26 @@ async fn thread_bus() -> (Arc<EventBus>, String, String, String) {
     use hot_potato::store::BusStore;
     let store = Arc::new(InMemoryStore::new());
     let bus = Arc::new(EventBus::new(store.clone()));
-    for a in ["patricia", "diana", "victoria"] {
+    for a in ["alice", "bob", "carol"] {
         store.register(a).await.unwrap();
     }
     let mut root = hot_potato::message::Message::new(
-        "patricia", "diana", hot_potato::message::MsgType::Task, "root", "b", None);
+        "alice", "bob", hot_potato::message::MsgType::Task, "root", "b", None);
     root.created_at = chrono::Utc::now() - chrono::Duration::seconds(60);
     store.push(&root).await.unwrap();
 
     let mut r1 = hot_potato::message::Message::new(
-        "diana", "patricia", hot_potato::message::MsgType::Reply, "re: root", "b", Some(root.id.clone()));
+        "bob", "alice", hot_potato::message::MsgType::Reply, "re: root", "b", Some(root.id.clone()));
     r1.created_at = chrono::Utc::now() - chrono::Duration::seconds(30);
     store.push(&r1).await.unwrap();
 
     let mut r2 = hot_potato::message::Message::new(
-        "patricia", "diana", hot_potato::message::MsgType::Reply, "re: re: root", "b", Some(r1.id.clone()));
+        "alice", "bob", hot_potato::message::MsgType::Reply, "re: re: root", "b", Some(r1.id.clone()));
     r2.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
     store.push(&r2).await.unwrap();
 
     let mut stray = hot_potato::message::Message::new(
-        "victoria", "patricia", hot_potato::message::MsgType::Task, "unrelated", "b", None);
+        "carol", "alice", hot_potato::message::MsgType::Task, "unrelated", "b", None);
     stray.created_at = chrono::Utc::now() - chrono::Duration::seconds(5);
     store.push(&stray).await.unwrap();
 

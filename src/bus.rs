@@ -42,6 +42,16 @@ impl EventBus {
         Ok(())
     }
 
+    /// Drop an agent from the bus (topology correction, 2026-09-16: human ≠
+    /// bus agent). Removes the role + mailbox registration; letters already
+    /// addressed to them stay in the store (observer view / audit) and the
+    /// queue sweeper skips them since the push registry entry is gone.
+    pub async fn unregister(&self, agent: &str) -> BusResult<()> {
+        self.store.unregister(agent).await?;
+        self.roles.write().await.remove(agent);
+        Ok(())
+    }
+
     /// Hot potato: write the letter and let go. Returns the id to track.
     pub async fn send(
         &self,
@@ -206,9 +216,9 @@ mod tests {
     async fn bus() -> EventBus {
         let store = Arc::new(InMemoryStore::new());
         let bus = EventBus::new(store);
-        bus.register("patricia", Role::Pm).await.unwrap();
-        bus.register("diana", Role::Worker).await.unwrap();
-        bus.register("victoria", Role::Worker).await.unwrap();
+        bus.register("alice", Role::Pm).await.unwrap();
+        bus.register("bob", Role::Worker).await.unwrap();
+        bus.register("carol", Role::Worker).await.unwrap();
         bus
     }
 
@@ -216,18 +226,18 @@ mod tests {
     async fn send_poll_reply_ack_roundtrip() {
         let b = bus().await;
         let id = b
-            .send("patricia", "diana", MsgType::Task, "run X", "body", None)
+            .send("alice", "bob", MsgType::Task, "run X", "body", None)
             .await
             .unwrap();
 
-        let mail = b.poll("diana", 0).await.unwrap();
+        let mail = b.poll("bob", 0).await.unwrap();
         assert_eq!(mail.len(), 1);
         assert_eq!(mail[0].id, id);
 
         let reply_id = b
             .send(
-                "diana",
-                "patricia",
+                "bob",
+                "alice",
                 MsgType::Reply,
                 "re: run X",
                 "done, see csv",
@@ -237,18 +247,18 @@ mod tests {
             .unwrap();
         assert!(!reply_id.is_empty());
 
-        let acked = b.ack("diana", &id, "delivered csv").await.unwrap();
+        let acked = b.ack("bob", &id, "delivered csv").await.unwrap();
         assert_eq!(acked.status, crate::message::MessageStatus::Acked);
 
-        let p_status = b.status("patricia").await.unwrap();
-        assert_eq!(p_status.len(), 1); // only the task she sent (reply is diana's)
+        let p_status = b.status("alice").await.unwrap();
+        assert_eq!(p_status.len(), 1); // only the task she sent (reply is bob's)
     }
 
     #[tokio::test]
     async fn worker_cannot_broadcast() {
         let b = bus().await;
         let err = b
-            .send("diana", "*", MsgType::Broadcast, "spam", "body", None)
+            .send("bob", "*", MsgType::Broadcast, "spam", "body", None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not allowed to broadcast"));
@@ -258,19 +268,19 @@ mod tests {
     async fn pm_can_broadcast_fans_out() {
         let b = bus().await;
         let ids = b
-            .broadcast("patricia", "standup 9:00", "be there")
+            .broadcast("alice", "standup 9:00", "be there")
             .await
             .unwrap();
-        assert_eq!(ids.len(), 2); // diana + victoria, not patricia
-        assert_eq!(b.peek("diana").await.unwrap().len(), 1);
-        assert_eq!(b.peek("victoria").await.unwrap().len(), 1);
+        assert_eq!(ids.len(), 2); // bob + carol, not alice
+        assert_eq!(b.peek("bob").await.unwrap().len(), 1);
+        assert_eq!(b.peek("carol").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn reply_without_ref_rejected() {
         let b = bus().await;
         let err = b
-            .send("diana", "patricia", MsgType::Reply, "re:", "x", None)
+            .send("bob", "alice", MsgType::Reply, "re:", "x", None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("must carry `ref`"));
@@ -280,7 +290,7 @@ mod tests {
     async fn unregistered_sender_rejected() {
         let b = bus().await;
         let err = b
-            .send("mallory", "diana", MsgType::Task, "hi", "b", None)
+            .send("mallory", "bob", MsgType::Task, "hi", "b", None)
             .await
             .unwrap_err();
         assert!(matches!(err, BusError::UnknownAgent(_)));
@@ -290,22 +300,22 @@ mod tests {
     async fn chatlog_timestamps_flow() {
         let b = bus().await;
         let id = b
-            .send("patricia", "diana", MsgType::Task, "t", "b", None)
+            .send("alice", "bob", MsgType::Task, "t", "b", None)
             .await
             .unwrap();
 
         // queued: no read receipt yet
-        let s0 = b.status("patricia").await.unwrap();
+        let s0 = b.status("alice").await.unwrap();
         assert!(s0[0].read_at.is_none());
 
-        b.poll("diana", 0).await.unwrap();
-        let read = b.mark_read("diana", &id).await.unwrap();
+        b.poll("bob", 0).await.unwrap();
+        let read = b.mark_read("bob", &id).await.unwrap();
         assert_eq!(read.status, crate::message::MessageStatus::Read);
         assert!(read.read_at.is_some());
         assert!(read.delivered_at.is_some());
 
         // read->ack legal; delivered_at <= read_at
-        let acked = b.ack("diana", &id, "done").await.unwrap();
+        let acked = b.ack("bob", &id, "done").await.unwrap();
         assert!(acked.delivered_at.unwrap() <= acked.read_at.unwrap());
         assert!(acked.read_at.unwrap() <= acked.acked_at.unwrap());
     }
@@ -314,10 +324,10 @@ mod tests {
     async fn read_before_delivery_rejected() {
         let b = bus().await;
         let id = b
-            .send("patricia", "diana", MsgType::Task, "t", "b", None)
+            .send("alice", "bob", MsgType::Task, "t", "b", None)
             .await
             .unwrap();
-        let err = b.mark_read("diana", &id).await.unwrap_err();
+        let err = b.mark_read("bob", &id).await.unwrap_err();
         assert!(matches!(err, BusError::NotDeliverable(_, _)));
     }
 
@@ -325,20 +335,20 @@ mod tests {
     async fn archive_only_counts_acked() {
         let b = bus().await;
         let id = b
-            .send("patricia", "diana", MsgType::Task, "t", "b", None)
+            .send("alice", "bob", MsgType::Task, "t", "b", None)
             .await
             .unwrap();
         assert!(b.archive().await.unwrap().is_empty());
-        b.poll("diana", 0).await.unwrap();
-        b.ack("diana", &id, "done").await.unwrap();
+        b.poll("bob", 0).await.unwrap();
+        b.ack("bob", &id, "done").await.unwrap();
         assert_eq!(b.archive().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn delete_one_removes_exactly_that_letter() {
         let b = bus().await;
-        let keep = b.send("patricia", "diana", MsgType::Task, "keep", "b", None).await.unwrap();
-        let kill = b.send("patricia", "diana", MsgType::Task, "kill", "b", None).await.unwrap();
+        let keep = b.send("alice", "bob", MsgType::Task, "keep", "b", None).await.unwrap();
+        let kill = b.send("alice", "bob", MsgType::Task, "kill", "b", None).await.unwrap();
         b.delete_letter(&kill).await.unwrap();
         assert!(b.delete_letter(&kill).await.is_err()); // gone — second delete 404s
         let listed = b.list_all().await.unwrap();
@@ -349,10 +359,10 @@ mod tests {
     #[tokio::test]
     async fn delete_all_clears_every_status() {
         let b = bus().await;
-        b.send("patricia", "diana", MsgType::Task, "queued", "b", None).await.unwrap();
-        let did = b.send("patricia", "diana", MsgType::Task, "delivered", "b", None).await.unwrap();
-        b.poll("diana", 0).await.unwrap();
-        b.ack("diana", &did, "done").await.unwrap();
+        b.send("alice", "bob", MsgType::Task, "queued", "b", None).await.unwrap();
+        let did = b.send("alice", "bob", MsgType::Task, "delivered", "b", None).await.unwrap();
+        b.poll("bob", 0).await.unwrap();
+        b.ack("bob", &did, "done").await.unwrap();
         let n = b.delete_all_letters().await.unwrap();
         assert_eq!(n, 2); // queued + acked both go
         assert!(b.list_all().await.unwrap().is_empty());

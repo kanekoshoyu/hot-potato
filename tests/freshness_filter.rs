@@ -54,12 +54,12 @@ async fn bus_with_aged_letters() -> Arc<EventBus> {
     use hot_potato::store::BusStore;
     let store = Arc::new(InMemoryStore::new());
     let bus = Arc::new(EventBus::new(store.clone()));
-    store.register("patricia").await.unwrap();
-    store.register("anastasia").await.unwrap();
+    store.register("alice").await.unwrap();
+    store.register("erin").await.unwrap();
     let ages = [10i64, 70, 300, 900, 3000, 10800];
     for age in ages {
         let mut m = hot_potato::message::Message::new(
-            "patricia", "anastasia", hot_potato::message::MsgType::AckOnly,
+            "alice", "erin", hot_potato::message::MsgType::AckOnly,
             format!("age-{}", age), "x", None);
         m.created_at = chrono::Utc::now() - chrono::Duration::seconds(age);
         store.push(&m).await.unwrap();

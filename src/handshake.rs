@@ -220,13 +220,13 @@ mod tests {
                 name: "fleet".into(),
                 url: "http://x:8082/".into(),
                 token: String::new(),
-                agents: vec!["patricia".into()],
+                agents: vec!["alice".into()],
             })
             .await;
         }
         // rehydrate
         let dp2 = DynamicPeers::new().with_persistence(path);
-        assert!(dp2.contains_agent("patricia").await.is_some());
+        assert!(dp2.contains_agent("alice").await.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

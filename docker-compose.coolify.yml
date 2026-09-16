@@ -12,6 +12,7 @@ services:
       HOT_POTATO_DESCRIPTION: 'EventMessageBus for AI agents'
       HOT_POTATO_URL: 'http://localhost:8080'
       HOT_POTATO_DATA_DIR: /data
+      HOT_POTATO_SWEEP_PERIOD_SECS: '300'   # queue sweeper: re-push queued letters every 5m
       RUST_LOG: info
     volumes:
       - hot-potato-data:/data

@@ -1,5 +1,5 @@
 # RFC-003 — Hot Potato v0.3: Steal HERDR's Best, Keep Our Soul
-起草: Patricia | 2026-09-09 | 状态: DRAFT（Diana 的 R14 意见合入后定稿）
+起草: the PM agent | 2026-09-09 | 状态: DRAFT（the quant agent 的 R14 意见合入后定稿）
 起源: Sho — "从 HERDR 里看看有什么能加到 Hot Potato 里的？也许我们做这个东西，比 HERDR 还牛逼"
 
 ## 定位声明（不丢魂）
@@ -22,7 +22,7 @@ HERDR 的杀手锏是 working/idle/blocked 侧边栏。我们做得更干净：a
 `herdr agent prompt --wait --until done` 的 bus 版：`message/wait`（block 直到信
 X 到达 acked，或 timeout）。客户端从此零轮询循环，纯 async 原生。
 - 预估: ~60 行（broadcast::watch 或 Notify）
-- 关键语义: wait 是客户端便利，**ack 仍是唯一完成真相**（Diana R13 定下的铁律）
+- 关键语义: wait 是客户端便利，**ack 仍是唯一完成真相**（the quant agent R13 定下的铁律）
 
 ### P3 — 心跳 + 死亡检测（比 HERDR 的屏幕检测更诚实）
 agent 定期发 presence 心跳；超过 N 分钟静默 → bus 自己在 /ws 上发
@@ -33,7 +33,7 @@ agent 定期发 presence 心跳；超过 N 分钟静默 → bus 自己在 /ws �
 重连的 agent 第一帧就知道自己信箱里有多少信、多老。HERDR 的 pane 恢复的 bus 版。
 - 预估: ~20 行
 
-## 反范围蔓延（Diana R13 铁律重申）
+## 反范围蔓延（the quant agent R13 铁律重申）
 
 - 不做屏幕扫描/终端管理——那是 HERDR 的地盘，也是 ops 风险来源
 - 不做第二完成信号——ack 永远是 canonical
@@ -45,7 +45,7 @@ P4 (20行, 立即) → P2 (60行) → P1 (120行) → P3 (80行)。合计 ~1 天
 完成后 Hot Potato 在"agent 状态感知"维度上**语义级超越** HERDR（声明式 vs 扫描式），
 同时保持邮差本色。
 
-## Open Questions（Diana 合入点）
+## Open Questions（the quant agent 合入点）
 
 1. presence 状态枚举够不够？要不要 allowed_state_transitions？
 2. message/wait 的 timeout 语义：bus 端计时还是客户端计时？

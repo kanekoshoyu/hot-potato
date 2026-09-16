@@ -1,5 +1,5 @@
 # RFC-002 — Hot Potato v0.3: Super-Connector Router Agent（Bus 拓扑 + 事件驱动）
-起草: Patricia | 2026-09-09 | 发起人: Sho
+起草: the PM agent | 2026-09-09 | 发起人: Sho
 状态: ACCEPTED-IN-PRINCIPLE — Sho 定性三条：①中央注册制 ②Bus 总线拓扑 ③事件驱动（A2A 只是收发手段，非实时req）
 
 ## Sho 的架构定性（三轮洞察，最终形态）
@@ -35,7 +35,7 @@
                     └──────────────────────────────┘
                        ▲A2A push    │A2A accept
                        │            ▼
-                 Patricia         Diana        Victoria ... Sho
+                 the PM agent         the quant agent        the data agent ... Sho
 ```
 
 **三层语义**：
@@ -58,8 +58,8 @@
 ## 问题回顾（为什么 v0.2 不够）
 
 v0.1/v0.2 的 bus 是**被动邮箱**：信躺着，等人 poll。
-- Patricia（TG 事件驱动）没有心跳 → 信在箱子里，她不知道
-- 乒乓依赖 Diana 勤快 poll → 动能靠人肉
+- the PM agent（TG 事件驱动）没有心跳 → 信在箱子里，她不知道
+- 乒乓依赖 the quant agent 勤快 poll → 动能靠人肉
 - 30 分钟发球钟是愿望，没有物理执行器
 
 **根因：拓扑里没有"主动推送者"。**
@@ -68,7 +68,7 @@ v0.1/v0.2 的 bus 是**被动邮箱**：信躺着，等人 poll。
 
 ```
                       ┌─────────────────────┐
-   Patricia (A2A) <──>│  hot-potato router   │<──>(A2A) Diana
+   the PM agent (A2A) <──>│  hot-potato router   │<──>(A2A) the quant agent
    (TG-driven)        │  = agent itself      │      (worker loop)
                       │  - own A2A account   │
                       │  - mailbox per agent │
@@ -110,9 +110,9 @@ agent/register 新增可选字段:
 
 ## 为什么这是对的方向（对齐既有验证）
 
-1. **peer dm 已证明 push 可行**：Diana 32 封回球全靠 peer dm 通道（`hermes peer dm`）
+1. **peer dm 已证明 push 可行**：the quant agent 32 封回球全靠 peer dm 通道（`hermes peer dm`）
    是推式的——她每次都收到。把 push 能力给 bus，等于把已验证的通道接进拓扑
-2. **Hermes A2A 插件双向皆可**：inbound（:9900 已配置于 Patricia）+ outbound client
+2. **Hermes A2A 插件双向皆可**：inbound（:9900 已配置于 the PM agent）+ outbound client
    tools——router 推送 = router 作为 A2A client 呼叫各 agent 的 inbound 端点
 3. **不推翻 v0.1/v0.2**：状态机、审计、线程、observer API、WebSocket 全部兼容；
    push 只是 delivered 跳的实现升级
@@ -131,13 +131,13 @@ agent/register 新增可选字段:
 - WebSocket feed（v0.2 F3）——push 机制的另一个消费者
 
 ### Phase C（智能路由，未来）
-- router 按 subject/type 路由（EXP 报告 → Diana；risk → Sho+Diana）
+- router 按 subject/type 路由（EXP 报告 → the quant agent；risk → Sho+the quant agent）
 - escalation：超时未 ack 自动升级链
 - 这就是 Sho 说的"分邮箱 + 连接起来"的完全体
 
 ## 与 30 分钟心跳 cron 的关系
 两者互补：
-- **cron 心跳** = Patricia 侧的自主议程（研究线索、主动分析）——解决"没人发球"
+- **cron 心跳** = the PM agent 侧的自主议程（研究线索、主动分析）——解决"没人发球"
 - **router push** = 拓扑侧的即时送达——解决"发了球对方不知道"
 乒乓要转起来，两个都要。cron 今天就能装（不等 v0.3）。
 

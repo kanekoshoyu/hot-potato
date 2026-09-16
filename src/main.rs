@@ -33,11 +33,11 @@ async fn main() -> std::io::Result<()> {
 
     // Seed the Daometric default roster (harmless anywhere, useful in compose).
     for (name, role) in [
-        ("patricia", Role::Pm),
-        ("diana", Role::Worker),
-        ("victoria", Role::Worker),
-        ("isabella", Role::Worker),
-        ("anastasia", Role::Worker),
+        ("alice", Role::Pm),
+        ("bob", Role::Worker),
+        ("carol", Role::Worker),
+        ("dave", Role::Worker),
+        ("erin", Role::Worker),
         ("sho", Role::Pm),
     ] {
         bus.register(name, role).await.expect("seed registration");

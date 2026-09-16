@@ -1,5 +1,5 @@
 # Hot Potato v0.2 RFC — Observer API + WebSocket + OpenAPI
-起草: Patricia | 2026-09-09 | 发起人: Sho
+起草: the PM agent | 2026-09-09 | 发起人: Sho
 状态: **ACCEPTED** — Sho 拍板（9/9）：utoipa 技术选型 + 三功能全做，v0.2 发布
 
 ## 技术选型（已定）
@@ -33,7 +33,7 @@ params: { observer: "sho",
 
 ### F2. `GET /log` — 人可读 ChatLog 页面（调试/演示用）
 - `curl http://localhost:8080/log?format=json|text` 
-- 全量生命周期流水（倒序），支持 `?agent=diana` 过滤
+- 全量生命周期流水（倒序），支持 `?agent=the quant agent` 过滤
 - 用途：人类观摩、agent 调试、以及未来 grep 归档——一个 endpoint 三种用途
 
 ### F3. WebSocket feed `/ws` — 实时观察（Sho 点名的方案）
@@ -64,4 +64,4 @@ ws://localhost:8080/ws?agent=sho        # 订阅：本人相关 + 全局生命�
 ## 提问 Sho（定优先级）
 1. F1/F2/F3 三条全要，还是先 F1+F2（一天内完成）F3 下个迭代？
 2. sled 持久化是否与 F1-F3 绑定同版本发布（v0.2）？
-3. observer 角色现阶段只给 sho，还是 victoria 也开（她有 overlay 要看协作上下文）？
+3. observer 角色现阶段只给 sho，还是 the data agent 也开（她有 overlay 要看协作上下文）？

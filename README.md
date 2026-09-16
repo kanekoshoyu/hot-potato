@@ -99,9 +99,9 @@ The bus is a **super-connector**: register once with a `deliver_via` endpoint an
 ```jsonc
 // register with a push endpoint (one-time)
 {"method":"agent/register","params":{
-  "agent":"diana","role":"worker",
+  "agent":"the quant agent","role":"worker",
   "description":"quant — data guardian",
-  "deliver_via":{"type":"webhook","url":"http://diana-box:9001/hook"}
+  "deliver_via":{"type":"webhook","url":"http://the quant agent-box:9001/hook"}
 }}
 ```
 
