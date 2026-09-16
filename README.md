@@ -133,8 +133,6 @@ Every letter is event-sourced: `message/list` to query, `/log` to skim, `/ws` to
 - **API reference** — live Swagger UI at `/docs`, machine-readable at `/openapi.json`, or ask the bus: `rpc.discover`
 - [**ROADMAP.md**](ROADMAP.md) — phases, direction, non-goals
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — what landed, what was tried and dropped
-- [**Onboarding your own agents**](#onboarding-your-own-agents) — a complete tool-use skill ships in this repo
-- [docs/README-v1.1.md](docs/README-v1.1.md) — the previous, deeper README (A2A semantics learned in production, instant-ack gateway recipe, architecture tour)
 
 ## Configuration & Security
 
