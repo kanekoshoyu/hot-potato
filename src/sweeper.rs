@@ -156,16 +156,97 @@ pub async fn sweep_once(
     pushed
 }
 
+/// One RPC call against a remote pool. Shared by `diagnose_peer` — plain
+/// reqwest POST, bearer auth, 10s timeout (the federation forwarder's budget).
+async fn pool_rpc(
+    peer: &crate::federation::Peer,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&peer.url)
+        .bearer_auth(&peer.token)
+        .timeout(std::time::Duration::from_secs(10))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("{} unreachable: {e}", peer.name()))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("{} bad json: {e}", peer.name()))?;
+    if !status.is_success() {
+        return Err(format!("{} replied HTTP {}", peer.name(), status));
+    }
+    if let Some(err) = body.get("error") {
+        return Err(format!("{} rpc error: {err}", peer.name()));
+    }
+    Ok(body.get("result").cloned().unwrap_or(serde_json::Value::Null))
+}
+
+/// Evidence-first diagnosis of one remote pool (the 2026-09-19 cross-pool
+/// auth outage, one call instead of a manual probe walk): is the peer bus
+/// alive, does it hold a peer entry for us, and does OUR credential for that
+/// peer still authenticate (the exact key they use when pushing letters to
+/// agents homed here).
+pub async fn diagnose_peer(peer: &crate::federation::Peer, me: &str) -> serde_json::Value {
+    let mut d = serde_json::json!({
+        "peer": peer.name(),
+        "bus_reachable": false,
+    });
+    match pool_rpc(peer, "agent/list", serde_json::json!({})).await {
+        Err(e) => {
+            d["error"] = serde_json::json!(e);
+            return d;
+        }
+        Ok(result) => {
+            d["bus_reachable"] = serde_json::json!(true);
+            let entry = result
+                .as_array()
+                .and_then(|list| {
+                    list.iter()
+                        .find(|a| a.get("agent").and_then(|v| v.as_str()) == Some(me))
+                })
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            d["their_peer_entry_for_us"] = entry;
+        }
+    }
+    match pool_rpc(peer, "peer/list", serde_json::json!({})).await {
+        Ok(_) => d["our_token_probe"] = serde_json::json!("ok"),
+        Err(e) => d["our_token_probe"] = serde_json::json!(format!("failed: {e}")),
+    }
+    d
+}
+
 /// Spawn the periodic sweeper if `HOT_POTATO_SWEEP_PERIOD_SECS` is set.
 /// Called from `router()`; a no-op in tests and bare local runs.
+/// Also runs the federation guard (`federation_watch_once`) each tick when
+/// peers are configured.
 pub fn spawn_if_enabled(
     bus: Arc<EventBus>,
     registry: Arc<Registry>,
     transport: Arc<dyn PushTransport>,
     hub: Arc<crate::ws::EventHub>,
+    peers: crate::federation::Peers,
+    pool_name: String,
 ) {
     let Some(period) = sweep_period() else { return };
+    // The bus itself is the watch-loop's sender identity for PM notices.
+    let watch_bus = bus.clone();
+    let watch_registry = registry.clone();
+    let watch_hub = hub.clone();
     tokio::spawn(async move {
+        let _ = watch_bus
+            .register("hot-potato", crate::bus::Role::Worker)
+            .await;
+        drop(watch_bus);
+        drop(watch_registry);
+        drop(watch_hub);
         eprintln!(
             "🥔 sweeper: re-pushing queued letters every {}s",
             period.as_secs()
@@ -178,8 +259,127 @@ pub fn spawn_if_enabled(
             if n > 0 {
                 eprintln!("🥔 sweeper: re-pushed {n} queued letter(s)");
             }
+            if !peers.is_empty() {
+                federation_watch_once(&bus, &registry, &transport, &hub, &peers, &pool_name)
+                    .await;
+            }
         }
     });
+}
+
+/// Preventive guard (2026-09-19 incident): a letter failing its push with an
+/// auth error is a stale registry credential, not a network fault. The
+/// registry entry carries what once worked, so re-registering the agent with
+/// its own fields (URL + optional `?token=` escape hatch) re-arms the
+/// register re-push and often heals the lane unattended. Peer pools are
+/// probed with our own credential — a stale pool token is reported, not
+/// auto-rotated (RFC-006 handshake is the credential-source fix). The PM is
+/// notified once per incident episode, not per tick.
+async fn federation_watch_once(
+    bus: &Arc<EventBus>,
+    registry: &Arc<Registry>,
+    transport: &Arc<dyn PushTransport>,
+    hub: &Arc<crate::ws::EventHub>,
+    peers: &crate::federation::Peers,
+    pool_name: &str,
+) {
+    static NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Ok(all) = bus.list_all().await else { return };
+    let auth_fail: Vec<&crate::message::Message> = all
+        .iter()
+        .filter(|l| {
+            l.status == crate::message::MessageStatus::Queued
+                && l.last_error.as_deref().map_or(false, |e| {
+                    e.contains("401") || e.contains("403") || e.contains("Unauthorized")
+                })
+        })
+        .collect();
+    if auth_fail.is_empty() {
+        NOTIFIED.store(false, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let receivers: std::collections::BTreeSet<String> = auth_fail
+        .iter()
+        .map(|l| l.receiver.clone())
+        .collect();
+    let n_receivers = receivers.len();
+    for receiver in &receivers {
+        eprintln!("🥔 watch: letters to `{receiver}` stuck on auth — re-registering");
+        let entry = registry.lookup(receiver).await;
+        let (url, token, description, tags) = match entry {
+            Some(e) => {
+                let (url, tok) = match &e.deliver_via {
+                    crate::deliver::DeliverVia::A2a { url, token } => (url.clone(), token.clone()),
+                    _ => (String::new(), None),
+                };
+                (url, tok, e.description.clone(), e.tags.clone())
+            }
+            None => (String::new(), None, String::new(), Vec::new()),
+        };
+        if url.is_empty() {
+            continue;
+        }
+        // `?token=` on the URL wins only when the stored token is absent.
+        let token = token.or_else(|| {
+            url.split("token=")
+                .nth(1)
+                .map(|t| t.split('&').next().unwrap_or(t).to_string())
+        });
+        registry
+            .register_tagged(
+                receiver,
+                &description,
+                crate::deliver::DeliverVia::A2a { url, token },
+                tags,
+            )
+            .await;
+        // Re-arm the register re-push inline (same receipt path as the RPC).
+        let Ok(queued) = bus.peek(receiver).await else { continue };
+        for letter in queued {
+            let mut push_letter = serde_json::to_value(&letter).expect("letter json");
+            push_letter["contextId"] = serde_json::json!(format!(
+                "bus-t-{}",
+                crate::message::Message::thread_root_id(&all, &letter.id)
+            ));
+            if let PushOutcome::Pushed =
+                dispatch_push(registry, transport, receiver, &push_letter).await
+            {
+                if let Ok(m) = bus.mark_delivered(receiver, &letter.id).await {
+                    hub.emit("delivered", &m);
+                }
+            }
+        }
+    }
+    let mut peer_lines = Vec::new();
+    for peer in peers.all() {
+        let d = diagnose_peer(&peer, pool_name).await;
+        let alive = d.get("bus_reachable").and_then(|v| v.as_bool()).unwrap_or(false);
+        let probe = d.get("our_token_probe").and_then(|v| v.as_str()).unwrap_or("?");
+        if !alive || probe != "ok" {
+            peer_lines.push(format!("- {peer:?}: reachable={alive} our_token_probe={probe}"));
+        }
+    }
+    if NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return; // one letter per episode; evidence keeps flowing via bus/diagnose
+    }
+    let mut summary = format!(
+        "watch: {} letter(s) stuck on push auth; registry re-armed for {} receiver(s).",
+        auth_fail.len(),
+        n_receivers
+    );
+    if !peer_lines.is_empty() {
+        summary.push_str(&format!("\nPeer pools:\n{}", peer_lines.join("\n")));
+    }
+    let _ = bus
+        .send(
+            "hot-potato",
+            "patricia",
+            crate::message::MsgType::Task,
+            "[bus] push auth failures auto-handled — evidence inside",
+            &summary,
+            None,
+        )
+        .await;
 }
 
 #[cfg(test)]

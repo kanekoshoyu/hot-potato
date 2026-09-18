@@ -143,6 +143,7 @@ async fn discover() -> Value {
             {"name":"bus/archive","params":[],"desc":"all acked letters (audit log)"},
             {"name":"message/list","params":["status (optional: queued|delivered|read|acked)","limit (optional, 0=all)","max_age_secs (optional: only letters newer than N seconds)","max_hops (optional: only letters with hops <= N, 0=local pool)","sender / receiver (optional: exact agent name)"],"desc":"OBSERVER: every letter on the bus, any status, read-only, adjustable filters (v0.3.6)"},
             {"name":"agent/list","params":[],"desc":"registry dump with team tags (dashboard legend) (RFC-005)"},
+            {"name":"bus/diagnose","params":[],"desc":"OBSERVER: push-health report — stale-credential letters, live push probe, peer-pool auth (2026-09-19 incident)"},
             {"name":"peer/invite","params":[],"desc":"generate a one-time invite code (dashboard: Invite a peer) (RFC-006)"},
             {"name":"peer/join","params":["code","url","name","agents[]"],"desc":"join a remote pool with an invite code (dashboard: Join a peer); three-way handshake completes automatically (RFC-006)"},
             {"name":"peer/list","params":[],"desc":"federation peers (env + dashboard-learned)"},
@@ -407,6 +408,77 @@ async fn rpc(
                 }
             })
             .await
+        }
+        "bus/diagnose" => {
+            // 2026-09-19 cross-pool auth outage: troubleshooting API. Evidence
+            // in one call — (1) letters whose last push failed on auth, with
+            // counts and error text; (2) a live push probe (dummy letter with
+            // `probe:true`, delivered-or-dead by design, never a real task);
+            // (3) peer pools checked with OUR stored credential.
+            let all = bus.list_all().await.unwrap_or_default();
+            let stale: Vec<Value> = all
+                .iter()
+                .filter(|l| {
+                    l.status == crate::message::MessageStatus::Queued
+                        && l.last_error.as_deref().map_or(false, |e| {
+                            e.contains("401") || e.contains("403") || e.contains("Unauthorized")
+                        })
+                })
+                .map(|l| {
+                    json!({
+                        "id": l.id, "receiver": l.receiver, "sender": l.sender,
+                        "subject": l.subject, "attempts": l.attempts,
+                        "last_error": l.last_error,
+                        "age_secs": (chrono::Utc::now() - l.created_at).num_seconds(),
+                    })
+                })
+                .collect();
+            let probe_receiver = registry
+                .all()
+                .await
+                .into_iter()
+                .find(|e| e.deliver_via.is_push())
+                .map(|e| e.agent);
+            let probe = match probe_receiver {
+                Some(agent) => {
+                    let letter = json!({
+                        "id": format!("probe-{}", chrono::Utc::now().timestamp()),
+                        "sender": "bus-probe", "receiver": agent,
+                        "type": "task",
+                        "subject": "[probe] bus/diagnose push self-test (ignore)",
+                        "body": "Transport probe only. Delivered-or-dead by design; requires no action.",
+                        "probe": true,
+                    });
+                    let transport: Arc<dyn crate::deliver::PushTransport> =
+                        Arc::new(crate::deliver::HttpTransport::new());
+                    match crate::deliver::dispatch_push(&registry, &transport, &agent, &letter)
+                        .await
+                    {
+                        crate::deliver::PushOutcome::Pushed => json!({"receiver": agent, "result": "pushed"}),
+                        crate::deliver::PushOutcome::Failed { error } => {
+                            json!({"receiver": agent, "result": "failed", "error": error})
+                        }
+                        crate::deliver::PushOutcome::Skipped { reason } => {
+                            json!({"receiver": agent, "result": "skipped", "reason": reason})
+                        }
+                    }
+                }
+                None => json!({"result": "no push-registered agent to probe"}),
+            };
+            let peers_report = {
+                let mut out = Vec::new();
+                for peer in config.peers.all() {
+                    out.push(crate::sweeper::diagnose_peer(&peer, &config.pool_name).await);
+                }
+                out
+            };
+            Ok(json!({
+                "pool": config.pool_name,
+                "stale_auth_letters": stale,
+                "stale_auth_count": stale.len(),
+                "live_push_probe": probe,
+                "peers": peers_report,
+            }))
         }
         "agent/list" => {
             // RFC-005: registry dump with tags — the dashboard's team legend.
@@ -1460,6 +1532,8 @@ pub fn router(
         registry.clone(),
         Arc::new(crate::deliver::HttpTransport::new()),
         hub.clone(),
+        config.peers.clone(),
+        config.pool_name.clone(),
     );
     let app = crate::ws::router()
         .route("/", get(dashboard).post(rpc))
