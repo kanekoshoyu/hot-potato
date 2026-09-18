@@ -24,12 +24,18 @@ pub enum MsgType {
 pub enum MessageStatus {
     /// Written to the recipient's mailbox, recipient unaware.
     Queued,
+    /// A dispatcher is actively pushing this letter (in-flight, CAS-gated:
+    /// a second PushStarted on a Pushing letter is a no-op).
+    Pushing,
     /// Recipient polled it — hot potato is now in their hands.
     Delivered,
     /// Recipient opened/read the payload (chatlog-style read receipt).
     Read,
     /// Recipient finished their part and filed the result.
     Acked,
+    /// Terminal: push attempts exhausted (poison letter) or operator-judged
+    /// undeliverable. Visible in message/list; never retried by the sweeper.
+    Dead,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +70,18 @@ pub struct Message {
     /// Federation (RFC-004): pool that handed this letter over, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forwarded_from: Option<String>,
+    /// Push attempt counter (incremented on every PushStarted).
+    #[serde(default)]
+    pub attempts: u32,
+    /// When the last push attempt started (Pushing liveness tracking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_push_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last push failure reason, if any (rejected or errored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// When the letter was declared Dead and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_reason: Option<String>,
 }
 
 impl Message {
@@ -108,6 +126,10 @@ impl Message {
             ack_note: None,
             hops: 0,
             forwarded_from: None,
+            attempts: 0,
+            last_push_at: None,
+            last_error: None,
+            dead_reason: None,
         }
     }
 }

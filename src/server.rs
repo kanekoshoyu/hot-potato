@@ -164,8 +164,16 @@ async fn rpc(
     // dashboard/login must pass WITHOUT any credential — it IS the credential
     // exchange. Validate user/pass, mint a session, never reach the bus.
     if req.method == "dashboard/login" {
-        let user = req.params.get("username").and_then(|v| v.as_str()).unwrap_or("");
-        let pass = req.params.get("password").and_then(|v| v.as_str()).unwrap_or("");
+        let user = req
+            .params
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let pass = req
+            .params
+            .get("password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if user == config.dashboard_user && pass == config.dashboard_password {
             let sid = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().simple().to_string();
             sessions.write().await.insert(sid.clone());
@@ -176,7 +184,9 @@ async fn rpc(
         }
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32002,"message":"invalid credentials"}})),
+            Json(
+                json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32002,"message":"invalid credentials"}}),
+            ),
         );
     }
 
@@ -219,7 +229,10 @@ async fn rpc(
                         match s.as_str() {
                             "a2a" => crate::deliver::DeliverVia::A2a {
                                 url,
-                                token: p.get("token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                token: p
+                                    .get("token")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
                             },
                             "webhook" => crate::deliver::DeliverVia::Webhook { url },
                             _ => crate::deliver::DeliverVia::Relay { url },
@@ -270,7 +283,9 @@ async fn rpc(
                     let transport: Arc<dyn crate::deliver::PushTransport> =
                         Arc::new(crate::deliver::HttpTransport::new());
                     tokio::spawn(async move {
-                        let Ok(queued) = bus2.peek(&re_agent).await else { return };
+                        let Ok(queued) = bus2.peek(&re_agent).await else {
+                            return;
+                        };
                         // v1.2.0: per-thread A2A contextId (rate-limit fix) —
                         // resolve each letter's thread root once per re-push.
                         let all = bus2.list_all().await.unwrap_or_default();
@@ -288,11 +303,28 @@ async fn rpc(
                                 &push_letter,
                             )
                             .await;
-                            if let crate::deliver::PushOutcome::Pushed = outcome {
-                                if let Ok(m) =
-                                    bus2.mark_delivered(&re_agent, &letter.id).await
-                                {
-                                    hub.emit("delivered", &m);
+                            crate::deliver::log_push_outcome(&letter.id, &re_agent, &outcome);
+                            if !bus2
+                                .claim_push(&re_agent, &letter.id)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                continue; // lost CAS race — winner owns the outcome
+                            }
+                            match outcome {
+                                crate::deliver::PushOutcome::Pushed => {
+                                    if let Ok(m) = bus2.push_succeeded(&re_agent, &letter.id).await
+                                    {
+                                        hub.emit("delivered", &m);
+                                    }
+                                }
+                                crate::deliver::PushOutcome::Failed { error } => {
+                                    let _ = bus2.push_failed(&re_agent, &letter.id, &error).await;
+                                }
+                                crate::deliver::PushOutcome::Skipped { reason } => {
+                                    let _ = bus2
+                                        .reclaim_stale_pushing(&re_agent, &letter.id, &reason)
+                                        .await;
                                 }
                             }
                         }
@@ -355,7 +387,9 @@ async fn rpc(
             if id.is_empty() {
                 return (
                     StatusCode::OK,
-                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":"missing param: id"}})),
+                    Json(
+                        json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":"missing param: id"}}),
+                    ),
                 );
             }
             let all = bus.list_all().await.unwrap_or_default();
@@ -364,7 +398,9 @@ async fn rpc(
                 None => {
                     return (
                         StatusCode::OK,
-                        Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":format!("message not found: {id}")}})),
+                        Json(
+                            json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32602,"message":format!("message not found: {id}")}}),
+                        ),
                     );
                 }
             };
@@ -479,9 +515,7 @@ async fn rpc(
                             return Err("federated send requires the pool bearer token".into());
                         }
                         if hops == 0 || forwarded_from.is_none() {
-                            return Err(
-                                "federated send must carry hops and forwarded_from".into()
-                            );
+                            return Err("federated send must carry hops and forwarded_from".into());
                         }
                         if hops > crate::federation::MAX_HOPS {
                             return Err(format!(
@@ -506,8 +540,14 @@ async fn rpc(
                         }
                         let id = bus3
                             .send_envelope(
-                                &sender, &receiver, mt, &subject, &body, r#ref,
-                                hops, forwarded_from,
+                                &sender,
+                                &receiver,
+                                mt,
+                                &subject,
+                                &body,
+                                r#ref,
+                                hops,
+                                forwarded_from,
                             )
                             .await
                             .map_err(|e| e.to_string())?;
@@ -528,11 +568,15 @@ async fn rpc(
                         let push_id = id.clone();
                         tokio::spawn(async move {
                             let stored = bus4.peek(&push_receiver).await;
-                            let Some(letter) = stored.ok().and_then(|v| {
-                                v.into_iter().find(|m| m.id == push_id)
-                            }) else { return };
+                            let Some(letter) = stored
+                                .ok()
+                                .and_then(|v| v.into_iter().find(|m| m.id == push_id))
+                            else {
+                                return;
+                            };
                             // v1.2.0: per-thread A2A contextId (rate-limit fix)
-                            let mut push_letter = serde_json::to_value(&letter).expect("letter json");
+                            let mut push_letter =
+                                serde_json::to_value(&letter).expect("letter json");
                             if let Ok(all) = bus4.list_all().await {
                                 push_letter["contextId"] = serde_json::json!(format!(
                                     "bus-t-{}",
@@ -540,11 +584,36 @@ async fn rpc(
                                 ));
                             }
                             let outcome = crate::deliver::dispatch_push(
-                                &registry4, &transport, &push_receiver, &push_letter,
-                            ).await;
-                            if let crate::deliver::PushOutcome::Pushed = outcome {
-                                if let Ok(m) = bus4.mark_delivered(&push_receiver, &push_id).await {
-                                    hub3.emit("delivered", &m);
+                                &registry4,
+                                &transport,
+                                &push_receiver,
+                                &push_letter,
+                            )
+                            .await;
+                            crate::deliver::log_push_outcome(&push_id, &push_receiver, &outcome);
+                            if !bus4
+                                .claim_push(&push_receiver, &push_id)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                return; // lost CAS race — winner owns the outcome
+                            }
+                            match outcome {
+                                crate::deliver::PushOutcome::Pushed => {
+                                    if let Ok(m) =
+                                        bus4.push_succeeded(&push_receiver, &push_id).await
+                                    {
+                                        hub3.emit("delivered", &m);
+                                    }
+                                }
+                                crate::deliver::PushOutcome::Failed { error } => {
+                                    let _ =
+                                        bus4.push_failed(&push_receiver, &push_id, &error).await;
+                                }
+                                crate::deliver::PushOutcome::Skipped { reason } => {
+                                    let _ = bus4
+                                        .reclaim_stale_pushing(&push_receiver, &push_id, &reason)
+                                        .await;
                                 }
                             }
                         });
@@ -577,24 +646,31 @@ async fn rpc(
                             }
                             let id = bus3
                                 .send_envelope(
-                                    &sender, &receiver, mt, &subject, &body, r#ref.clone(),
-                                    0, Some(pool_name.clone()),
+                                    &sender,
+                                    &receiver,
+                                    mt,
+                                    &subject,
+                                    &body,
+                                    r#ref.clone(),
+                                    0,
+                                    Some(pool_name.clone()),
                                 )
                                 .await
                                 .map_err(|e| e.to_string())?;
                             // Fetch the stored letter, mark it forwarded on
                             // successful handover; on failure it stays queued.
                             let stored = bus3.peek(&receiver).await;
-                            let letter = stored.ok().and_then(|v| {
-                                v.into_iter().find(|m| m.id == id)
-                            });
-                            match crate::federation::forward(&peer, &letter.clone().expect(
-                                "letter just stored", ), &pool_name).await {
+                            let letter =
+                                stored.ok().and_then(|v| v.into_iter().find(|m| m.id == id));
+                            match crate::federation::forward(
+                                &peer,
+                                &letter.clone().expect("letter just stored"),
+                                &pool_name,
+                            )
+                            .await
+                            {
                                 Ok(()) => {
-                                    if let Ok(m) = bus3
-                                        .mark_delivered(&receiver, &id)
-                                        .await
-                                    {
+                                    if let Ok(m) = bus3.mark_delivered(&receiver, &id).await {
                                         hub3.emit("delivered", &m);
                                     }
                                     return Ok(json!({
@@ -664,20 +740,23 @@ async fn rpc(
                             &push_letter,
                         )
                         .await;
+                        crate::deliver::log_push_outcome(&push_id, &push_receiver, &outcome);
                         match outcome {
                             crate::deliver::PushOutcome::Pushed => {
-                                if let Ok(m) =
-                                    bus2.mark_delivered(&push_receiver, &push_id).await
-                                {
+                                if let Ok(m) = bus2.push_succeeded(&push_receiver, &push_id).await {
                                     hub.emit("delivered", &m);
                                 }
                             }
                             crate::deliver::PushOutcome::Failed { error } => {
-                                eprintln!(
-                                    "🥔 push failed for {push_receiver}: {error}"
-                                );
+                                // Honest failure: stays queued for sweeper retry
+                                // (or Dead after MAX_ATTEMPTS) — never marked delivered.
+                                let _ = bus2.push_failed(&push_receiver, &push_id, &error).await;
                             }
-                            crate::deliver::PushOutcome::Skipped { .. } => {}
+                            crate::deliver::PushOutcome::Skipped { reason } => {
+                                let _ = bus2
+                                    .reclaim_stale_pushing(&push_receiver, &push_id, &reason)
+                                    .await;
+                            }
                         }
                     });
                     Ok(json!({"id": id}))
@@ -814,8 +893,16 @@ async fn rpc(
             // sender / receiver: exact agent name match
             let max_age_secs = req.params.get("max_age_secs").and_then(|v| v.as_i64());
             let max_hops = req.params.get("max_hops").and_then(|v| v.as_u64());
-            let sender_f = req.params.get("sender").and_then(|v| v.as_str()).map(str::to_string);
-            let receiver_f = req.params.get("receiver").and_then(|v| v.as_str()).map(str::to_string);
+            let sender_f = req
+                .params
+                .get("sender")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let receiver_f = req
+                .params
+                .get("receiver")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             bus.list_all()
                 .await
                 .map(|mut msgs| {
@@ -826,9 +913,7 @@ async fn rpc(
                     }
                     if let Some(age) = max_age_secs {
                         let now = chrono::Utc::now();
-                        msgs.retain(|m| {
-                            (now - m.created_at).num_seconds() <= age
-                        });
+                        msgs.retain(|m| (now - m.created_at).num_seconds() <= age);
                     }
                     if let Some(h) = max_hops {
                         msgs.retain(|m| (m.hops as u64) <= h);
@@ -861,11 +946,29 @@ async fn rpc(
             // dials back peer/register (step 2), then proves the link with a
             // welcome letter (step 3).
             let p = &req.params;
-            let code = p.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let agents: Vec<String> = p.get("agents").and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            let code = p
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = p
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = p
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let agents: Vec<String> = p
+                .get("agents")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             if code.is_empty() || url.is_empty() || name.is_empty() || agents.is_empty() {
                 return (
@@ -875,7 +978,9 @@ async fn rpc(
                 );
             }
             // Decode inviter URL from the code tail (urlsafe b64 of json).
-            let inviter_url = code.rsplit('-').next()
+            let inviter_url = code
+                .rsplit('-')
+                .next()
                 .and_then(|tail| crate::handshake::b64url_decode(tail))
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
                 .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string));
@@ -899,17 +1004,23 @@ async fn rpc(
                 .send()
                 .await;
             let present = match present {
-                Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
-                Ok(r) => return (
-                    StatusCode::OK,
-                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
+                Ok(r) if r.status().is_success() => {
+                    r.json::<serde_json::Value>().await.unwrap_or_default()
+                }
+                Ok(r) => {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
                         "message":format!("inviter replied HTTP {}", r.status())}})),
-                ),
-                Err(e) => return (
-                    StatusCode::OK,
-                    Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
+                    )
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({"jsonrpc":"2.0","id":req.id,"error":{"code":-32001,
                         "message":format!("cannot reach inviter at {inviter_url}: {e}")}})),
-                ),
+                    )
+                }
             };
             if let Some(err) = present.get("error") {
                 return (
@@ -920,16 +1031,28 @@ async fn rpc(
             }
             // The inviter's accept response carries its identity for step 2.
             let inviter = present.get("result").cloned().unwrap_or(json!({}));
-            let inviter_name = inviter.get("name").and_then(|v| v.as_str()).unwrap_or("peer").to_string();
-            let inviter_agents: Vec<String> = inviter.get("agents").and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            let inviter_name = inviter
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("peer")
+                .to_string();
+            let inviter_agents: Vec<String> = inviter
+                .get("agents")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
-            dynamic_peers.add(crate::federation::Peer {
-                name: inviter_name.clone(),
-                url: inviter_url.clone(),
-                token: String::new(),
-                agents: inviter_agents,
-            }).await;
+            dynamic_peers
+                .add(crate::federation::Peer {
+                    name: inviter_name.clone(),
+                    url: inviter_url.clone(),
+                    token: String::new(),
+                    agents: inviter_agents,
+                })
+                .await;
             Ok(json!({
                 "joined": inviter_name,
                 "note": "handshake complete: peer learned, forward path proven by their welcome letter"
@@ -941,10 +1064,24 @@ async fn rpc(
             // letter (step 3).
             let p = &req.params;
             let code = p.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let agents: Vec<String> = p.get("agents").and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            let url = p
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = p
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let agents: Vec<String> = p
+                .get("agents")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             if !crate::handshake::consume_invite(&invites, code).await {
                 return (
@@ -960,29 +1097,53 @@ async fn rpc(
                         "message":"url, name, agents[] all required"}})),
                 );
             }
-            dynamic_peers.add(crate::federation::Peer {
-                name: name.clone(), url: url.clone(), token: String::new(),
-                agents: agents.clone(),
-            }).await;
+            dynamic_peers
+                .add(crate::federation::Peer {
+                    name: name.clone(),
+                    url: url.clone(),
+                    token: String::new(),
+                    agents: agents.clone(),
+                })
+                .await;
             let client = reqwest::Client::new();
             // Step 2: tell the joiner who we are.
-            let my_agents = registry.all().await.iter().map(|e| e.agent.clone()).collect::<Vec<_>>();
-            let _ = client.post(&url).timeout(std::time::Duration::from_secs(10))
-                .json(&json!({"jsonrpc":"2.0","id":1,"method":"peer/register","params":{
-                    "name": config.pool_name, "url": config.public_url, "agents": my_agents }}))
-                .send().await;
+            let my_agents = registry
+                .all()
+                .await
+                .iter()
+                .map(|e| e.agent.clone())
+                .collect::<Vec<_>>();
+            let _ = client
+                .post(&url)
+                .timeout(std::time::Duration::from_secs(10))
+                .json(
+                    &json!({"jsonrpc":"2.0","id":1,"method":"peer/register","params":{
+                    "name": config.pool_name, "url": config.public_url, "agents": my_agents }}),
+                )
+                .send()
+                .await;
             // Step 3: prove the forward path with a real letter.
             if let Some(first) = agents.first() {
-                let _ = client.post(&url).timeout(std::time::Duration::from_secs(10))
+                let _ = client
+                    .post(&url)
+                    .timeout(std::time::Duration::from_secs(10))
                     .header("x-potato-pool", &config.pool_name)
-                    .json(&json!({"jsonrpc":"2.0","id":2,"method":"message/send","params":{
+                    .json(
+                        &json!({"jsonrpc":"2.0","id":2,"method":"message/send","params":{
                         "sender":"sho","receiver":first,"type":"task",
                         "subject":"[handshake] link established",
                         "body":format!("pool `{name}` joined federation; forward path verified."),
-                        "hops":1,"forwarded_from":config.pool_name }}))
-                    .send().await;
+                        "hops":1,"forwarded_from":config.pool_name }}),
+                    )
+                    .send()
+                    .await;
             }
-            let my_agents2 = registry.all().await.iter().map(|e| e.agent.clone()).collect::<Vec<_>>();
+            let my_agents2 = registry
+                .all()
+                .await
+                .iter()
+                .map(|e| e.agent.clone())
+                .collect::<Vec<_>>();
             Ok(json!({"name": config.pool_name, "agents": my_agents2,
                 "note": "joiner recorded; callback + welcome letter sent"}))
         }
@@ -991,10 +1152,24 @@ async fn rpc(
             // joiner. Authenticated implicitly by being dialed from a bus that
             // just consumed our invite (v1 trust: network-level reachability).
             let p = &req.params;
-            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let agents: Vec<String> = p.get("agents").and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            let name = p
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = p
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let agents: Vec<String> = p
+                .get("agents")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             if name.is_empty() || url.is_empty() || agents.is_empty() {
                 return (
@@ -1003,9 +1178,14 @@ async fn rpc(
                         "message":"name, url, agents[] required"}})),
                 );
             }
-            dynamic_peers.add(crate::federation::Peer {
-                name, url, token: String::new(), agents,
-            }).await;
+            dynamic_peers
+                .add(crate::federation::Peer {
+                    name,
+                    url,
+                    token: String::new(),
+                    agents,
+                })
+                .await;
             Ok(json!({"registered": true}))
         }
         "peer/list" => {
@@ -1016,10 +1196,13 @@ async fn rpc(
                     env_peers.push(p);
                 }
             }
-            Ok(json!(env_peers.iter().map(|p| json!({
-                "name": p.name(), "url": p.url, "agents": p.agents,
-                "auth": if p.token.is_empty() { "none" } else { "bearer" },
-            })).collect::<Vec<_>>()))
+            Ok(json!(env_peers
+                .iter()
+                .map(|p| json!({
+                    "name": p.name(), "url": p.url, "agents": p.agents,
+                    "auth": if p.token.is_empty() { "none" } else { "bearer" },
+                }))
+                .collect::<Vec<_>>()))
         }
         "rpc.discover" => Ok(discover().await),
         other => Err(format!(
@@ -1230,7 +1413,12 @@ pub fn router(
     // Queue sweeper (2026-09-16): self-healing re-dispatch of queued
     // letters. Enabled via HOT_POTATO_SWEEP_PERIOD_SECS; unset = off, so tests
     // and bare local runs see no background side effects.
-    crate::sweeper::spawn_if_enabled(bus.clone(), registry.clone(), Arc::new(crate::deliver::HttpTransport::new()), hub.clone());
+    crate::sweeper::spawn_if_enabled(
+        bus.clone(),
+        registry.clone(),
+        Arc::new(crate::deliver::HttpTransport::new()),
+        hub.clone(),
+    );
     let app = crate::ws::router()
         .route("/", get(dashboard).post(rpc))
         .route("/log", get(log_page))
@@ -1375,12 +1563,7 @@ mod tests {
         assert_eq!(res["result"]["status"], "acked");
 
         // status shows the lifecycle to the sender
-        let res = rpc_call(
-            app(bus.clone()),
-            "agent/status",
-            json!({"agent":"alice"}),
-        )
-        .await;
+        let res = rpc_call(app(bus.clone()), "agent/status", json!({"agent":"alice"})).await;
         let arr = res["result"].as_array().unwrap();
         assert_eq!(arr[0]["status"], "acked");
         assert!(arr[0]["acked_at"].is_string());
@@ -1525,30 +1708,51 @@ mod tests {
         // wrong password -> 401
         let bad = json!({"jsonrpc":"2.0","id":1,"method":"dashboard/login",
             "params":{"username":"admin","password":"nope"}});
-        let res = a.clone().oneshot(
-            Request::post("/").header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&bad).unwrap())).unwrap(),
-        ).await.unwrap();
+        let res = a
+            .clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&bad).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         // right password -> session
         let good = json!({"jsonrpc":"2.0","id":1,"method":"dashboard/login",
             "params":{"username":"admin","password":"88888888"}});
-        let res = a.clone().oneshot(
-            Request::post("/").header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&good).unwrap())).unwrap(),
-        ).await.unwrap();
+        let res = a
+            .clone()
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&good).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let sid: String = serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["session"]
-            .as_str().unwrap().into();
+            .as_str()
+            .unwrap()
+            .into();
         assert!(!sid.is_empty());
         // session header passes the token gate
         let body = json!({"jsonrpc":"2.0","id":1,"method":"agent/list","params":{}});
-        let res = a.oneshot(
-            Request::post("/").header("x-dashboard-session", &sid)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap(),
-        ).await.unwrap();
+        let res = a
+            .oneshot(
+                Request::post("/")
+                    .header("x-dashboard-session", &sid)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -1587,8 +1791,14 @@ mod tests {
         )
         .await;
         // send returns a JSON-RPC error (forward failed), letter stays queued
-        assert!(res.get("error").is_some(), "expected forward failure: {res}");
-        assert!(res["error"]["message"].as_str().unwrap().contains("stays queued"));
+        assert!(
+            res.get("error").is_some(),
+            "expected forward failure: {res}"
+        );
+        assert!(res["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stays queued"));
     }
 
     #[tokio::test]
@@ -1655,7 +1865,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["error"]["message"].as_str().unwrap().contains("hops"));
 
@@ -1676,7 +1888,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["result"]["forwarded"], true);
 
@@ -1718,9 +1932,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("hop limit"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hop limit"));
     }
 
     #[tokio::test]
@@ -1771,11 +1990,15 @@ mod tests {
         });
 
         tokio::spawn(async move {
-            axum::serve(l_a, router(bus_a, cfg_a, test_sessions())).await.unwrap();
+            axum::serve(l_a, router(bus_a, cfg_a, test_sessions()))
+                .await
+                .unwrap();
         });
         let bus_b2 = bus_b.clone();
         tokio::spawn(async move {
-            axum::serve(l_b, router(bus_b2, cfg_b, test_sessions())).await.unwrap();
+            axum::serve(l_b, router(bus_b2, cfg_b, test_sessions()))
+                .await
+                .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 

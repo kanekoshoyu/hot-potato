@@ -41,7 +41,9 @@ async fn rpc_call(app: &Router, method: &str, params: Value) -> Value {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     serde_json::from_slice::<Value>(&bytes).unwrap()["result"].clone()
 }
 
@@ -55,22 +57,46 @@ async fn thread_bus() -> (Arc<EventBus>, String, String, String) {
         store.register(a).await.unwrap();
     }
     let mut root = hot_potato::message::Message::new(
-        "alice", "bob", hot_potato::message::MsgType::Task, "root", "b", None);
+        "alice",
+        "bob",
+        hot_potato::message::MsgType::Task,
+        "root",
+        "b",
+        None,
+    );
     root.created_at = chrono::Utc::now() - chrono::Duration::seconds(60);
     store.push(&root).await.unwrap();
 
     let mut r1 = hot_potato::message::Message::new(
-        "bob", "alice", hot_potato::message::MsgType::Reply, "re: root", "b", Some(root.id.clone()));
+        "bob",
+        "alice",
+        hot_potato::message::MsgType::Reply,
+        "re: root",
+        "b",
+        Some(root.id.clone()),
+    );
     r1.created_at = chrono::Utc::now() - chrono::Duration::seconds(30);
     store.push(&r1).await.unwrap();
 
     let mut r2 = hot_potato::message::Message::new(
-        "alice", "bob", hot_potato::message::MsgType::Reply, "re: re: root", "b", Some(r1.id.clone()));
+        "alice",
+        "bob",
+        hot_potato::message::MsgType::Reply,
+        "re: re: root",
+        "b",
+        Some(r1.id.clone()),
+    );
     r2.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
     store.push(&r2).await.unwrap();
 
     let mut stray = hot_potato::message::Message::new(
-        "carol", "alice", hot_potato::message::MsgType::Task, "unrelated", "b", None);
+        "carol",
+        "alice",
+        hot_potato::message::MsgType::Task,
+        "unrelated",
+        "b",
+        None,
+    );
     stray.created_at = chrono::Utc::now() - chrono::Duration::seconds(5);
     store.push(&stray).await.unwrap();
 
@@ -103,11 +129,20 @@ async fn thread_query_excludes_unrelated_and_errors_on_missing() {
     let app = router(bus, cfg(), sessions());
 
     let res = rpc_call(&app, "message/thread", json!({"id": root})).await;
-    let ids: Vec<&str> = res.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert!(!ids.contains(&stray.as_str()), "unrelated letter must not leak into thread");
+    let ids: Vec<&str> = res
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&stray.as_str()),
+        "unrelated letter must not leak into thread"
+    );
 
     // missing id -> JSON-RPC error body (still 200 at HTTP layer)
-    let body = json!({"jsonrpc":"2.0","id":1,"method":"message/thread","params":{"id":"does-not-exist"}});
+    let body =
+        json!({"jsonrpc":"2.0","id":1,"method":"message/thread","params":{"id":"does-not-exist"}});
     let res = app
         .oneshot(
             Request::post("/")
@@ -118,7 +153,12 @@ async fn thread_query_excludes_unrelated_and_errors_on_missing() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
 }
