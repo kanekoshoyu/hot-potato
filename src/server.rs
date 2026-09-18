@@ -156,6 +156,56 @@ async fn discover() -> Value {
 /// Auth (either passes the gate):
 /// - agents: `Authorization: Bearer <HOT_POTATO_TOKEN>` (when the pool has one)
 /// - dashboard: `X-Dashboard-Session: <sid>` from `dashboard/login` (v0.3.9)
+
+/// Push-on-arrival (RFC-002), shared by single send and broadcast fan-out:
+/// fire-and-forget — a push failure never blocks the send or loses the
+/// letter. Honest outcomes (2026-09-18): Pushed → delivered; Failed →
+/// queued for sweeper retry (or Dead after MAX_ATTEMPTS); Skipped → claim
+/// released. Never marks a refused letter delivered.
+async fn push_on_arrival(
+    bus: Arc<EventBus>,
+    registry: Arc<crate::deliver::Registry>,
+    hub: Arc<crate::ws::EventHub>,
+    id: String,
+    receiver: String,
+) {
+    let transport: Arc<dyn crate::deliver::PushTransport> =
+        Arc::new(crate::deliver::HttpTransport::new());
+    // v1.2.0: per-thread A2A contextId (rate-limit fix) — one receiver
+    // session per thread, prompt cache hits.
+    let mut push_letter = match bus.peek(&receiver).await {
+        Ok(letters) => match letters.into_iter().find(|m| m.id == id) {
+            Some(letter) => serde_json::to_value(&letter).expect("letter json"),
+            None => return, // letter gone (read/acked/deleted) — nothing to push
+        },
+        Err(_) => return,
+    };
+    if let Ok(all) = bus.list_all().await {
+        push_letter["contextId"] = serde_json::json!(format!(
+            "bus-t-{}",
+            crate::message::Message::thread_root_id(&all, &id)
+        ));
+    }
+    let outcome =
+        crate::deliver::dispatch_push(&registry, &transport, &receiver, &push_letter).await;
+    crate::deliver::log_push_outcome(&id, &receiver, &outcome);
+    match outcome {
+        crate::deliver::PushOutcome::Pushed => {
+            if let Ok(m) = bus.push_succeeded(&receiver, &id).await {
+                hub.emit("delivered", &m);
+            }
+        }
+        crate::deliver::PushOutcome::Failed { error } => {
+            // Honest failure: stays queued for sweeper retry (or Dead after
+            // MAX_ATTEMPTS) — never marked delivered.
+            let _ = bus.push_failed(&receiver, &id, &error).await;
+        }
+        crate::deliver::PushOutcome::Skipped { reason } => {
+            let _ = bus.reclaim_stale_pushing(&receiver, &id, &reason).await;
+        }
+    }
+}
+
 async fn rpc(
     State((bus, hub, config, registry, invites, dynamic_peers, sessions)): State<BusState>,
     headers: HeaderMap,
@@ -506,6 +556,36 @@ async fn rpc(
                 let hub3 = hub.clone();
                 let dyn_peers3 = dynamic_peers.clone();
                 async move {
+                    // (0) receiver="all": materialize the broadcast (audit D5).
+                    // One letter per registered agent, each with its own
+                    // lifecycle through the state machine — never a literal
+                    // "all" mailbox. Push-on-arrival fires per copy, exactly
+                    // like a direct send.
+                    if receiver == "all" {
+                        let ids = bus3
+                            .broadcast(&sender, &subject, &body)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        for id in &ids {
+                            // Resolve each copy's receiver from the stored letter.
+                            if let Some(letter) = bus3
+                                .list_all()
+                                .await
+                                .ok()
+                                .and_then(|all| all.into_iter().find(|m| &m.id == id))
+                            {
+                                tokio::spawn(push_on_arrival(
+                                    bus3.clone(),
+                                    registry3.clone(),
+                                    hub3.clone(),
+                                    id.clone(),
+                                    letter.receiver,
+                                ));
+                            }
+                        }
+                        return Ok(json!({"ids": ids, "fanout": ids.len()}));
+                    }
+
                     // (1) inbound from a federated peer bus?
                     if let Some(from_pool) = fed_headers {
                         // Token required only when this bus has one configured.
@@ -714,51 +794,13 @@ async fn rpc(
                     hub3.emit("queued", &letter);
                     // Push-on-arrival (RFC-002): fire-and-forget — a push
                     // failure never blocks the send or loses the letter.
-                    // On success (or a2a "notified" semantics), mark the
-                    // letter delivered: it left the shelf without a poll.
-                    let registry = registry3.clone();
-                    let bus2 = bus3.clone();
-                    let transport: Arc<dyn crate::deliver::PushTransport> =
-                        Arc::new(crate::deliver::HttpTransport::new());
-                    let push_letter = serde_json::to_value(&letter).expect("letter json");
-                    let push_receiver = receiver.clone();
-                    let push_id = id.clone();
-                    tokio::spawn(async move {
-                        // v1.2.0: per-thread A2A contextId (rate-limit fix) —
-                        // one receiver session per thread, prompt cache hits.
-                        let mut push_letter = push_letter;
-                        if let Ok(all) = bus2.list_all().await {
-                            push_letter["contextId"] = serde_json::json!(format!(
-                                "bus-t-{}",
-                                crate::message::Message::thread_root_id(&all, &push_id)
-                            ));
-                        }
-                        let outcome = crate::deliver::dispatch_push(
-                            &registry,
-                            &transport,
-                            &push_receiver,
-                            &push_letter,
-                        )
-                        .await;
-                        crate::deliver::log_push_outcome(&push_id, &push_receiver, &outcome);
-                        match outcome {
-                            crate::deliver::PushOutcome::Pushed => {
-                                if let Ok(m) = bus2.push_succeeded(&push_receiver, &push_id).await {
-                                    hub.emit("delivered", &m);
-                                }
-                            }
-                            crate::deliver::PushOutcome::Failed { error } => {
-                                // Honest failure: stays queued for sweeper retry
-                                // (or Dead after MAX_ATTEMPTS) — never marked delivered.
-                                let _ = bus2.push_failed(&push_receiver, &push_id, &error).await;
-                            }
-                            crate::deliver::PushOutcome::Skipped { reason } => {
-                                let _ = bus2
-                                    .reclaim_stale_pushing(&push_receiver, &push_id, &reason)
-                                    .await;
-                            }
-                        }
-                    });
+                    tokio::spawn(push_on_arrival(
+                        bus3.clone(),
+                        registry3.clone(),
+                        hub.clone(),
+                        id.clone(),
+                        receiver.clone(),
+                    ));
                     Ok(json!({"id": id}))
                 }
             })
@@ -1814,6 +1856,33 @@ mod tests {
         .await;
         assert!(res.get("result").is_some(), "local send failed: {res}");
         assert!(res["result"]["forwarded"].is_null());
+        let peek = rpc_call(app(bus), "message/peek", json!({"agent":"carol"})).await;
+        assert_eq!(peek["result"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receiver_all_materializes_per_agent_letters() {
+        // audit D5: "all" must never become a literal mailbox; every registered
+        // agent gets their own letter with an independent lifecycle.
+        let bus = test_bus().await;
+        let res = rpc_call(
+            app(bus.clone()),
+            "message/send",
+            json!({"sender":"alice","receiver":"all","type":"broadcast",
+                   "subject":"roll call","body":"b"}),
+        )
+        .await;
+        assert!(res.get("result").is_some(), "all-send failed: {res}");
+        // alice is the sender (excluded) → bob + carol get copies
+        assert_eq!(res["result"]["fanout"], 2);
+
+        // No literal "all" mailbox exists; carol holds exactly one copy.
+        let letters = bus.list_all().await.unwrap();
+        assert!(!letters.iter().any(|m| m.receiver == "all"));
+        assert_eq!(letters.iter().filter(|m| m.receiver == "carol").count(), 1);
+
+        // Each copy is an independent letter — reading carol's copy must not
+        // touch anyone else's (single-copy here, but the lifecycle is per-letter).
         let peek = rpc_call(app(bus), "message/peek", json!({"agent":"carol"})).await;
         assert_eq!(peek["result"].as_array().unwrap().len(), 1);
     }

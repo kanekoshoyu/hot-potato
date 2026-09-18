@@ -52,8 +52,12 @@ pub fn retry_window(age: Duration, min_backoff: Duration) -> Duration {
 }
 
 /// Re-push every queued letter whose backoff window has elapsed. Returns how
-/// many letters were pushed (and marked delivered). Failures wait for the
-/// next sweep; nothing here can lose a letter — worst case is staying queued.
+/// many letters were pushed. Honest-failure semantics (2026-09-18 rewrite):
+/// a refused push keeps the letter queued and records attempts/last_error;
+/// after `MAX_ATTEMPTS` failures the letter goes terminal `Dead` instead of
+/// retrying forever. Stale `Pushing` letters (dispatcher died mid-push) are
+/// reclaimed to queued first. Nothing here can silently lose a letter — the
+/// worst case is a visible Dead letter with a reason attached.
 pub async fn sweep_once(
     bus: &Arc<EventBus>,
     registry: &Arc<Registry>,
@@ -276,6 +280,49 @@ mod tests {
             0,
             "sweep must mark delivered on push success"
         );
+    }
+
+    /// Always refuses — the lying-receipt E2E: a 4xx-style rejection must
+    /// NEVER flip the letter to delivered, and must go Dead (not retry
+    /// forever) once attempts are exhausted.
+    struct RejectingTransport;
+
+    #[async_trait::async_trait]
+    impl PushTransport for RejectingTransport {
+        async fn push(&self, _t: &DeliverVia, _l: &serde_json::Value) -> Result<(), String> {
+            Err("401 invalid token".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_pushes_stay_queued_then_go_dead() {
+        let (bus, registry) = bus_with_registry().await;
+        let hub = Arc::new(crate::ws::EventHub::new());
+        let transport: Arc<dyn PushTransport> = Arc::new(RejectingTransport);
+
+        let id = bus
+            .send("alice", "carol", MsgType::Task, "poison", "body", None)
+            .await
+            .unwrap();
+
+        // MAX_ATTEMPTS sweeps: every push is refused.
+        for i in 0..crate::state::MAX_ATTEMPTS {
+            let n = sweep_once(&bus, &registry, &transport, &hub, Duration::ZERO).await;
+            assert_eq!(n, 0, "refused push must not claim delivery (sweep {i})");
+        }
+        // After MAX_ATTEMPTS failed pushes the letter is terminal Dead with
+        // the last error attached — visible, not silently lost, NOT delivered.
+        let letters = bus.list_all().await.unwrap();
+        let m = letters.iter().find(|l| l.id == id).unwrap();
+        assert_eq!(
+            m.status,
+            crate::message::MessageStatus::Dead,
+            "poison letter must die honestly, got {:?}",
+            m.status
+        );
+        assert_eq!(m.attempts, crate::state::MAX_ATTEMPTS);
+        assert_eq!(m.last_error.as_deref(), Some("401 invalid token"));
+        assert!(m.delivered_at.is_none(), "dead ≠ delivered");
     }
 
     #[tokio::test]
