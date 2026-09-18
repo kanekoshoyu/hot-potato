@@ -295,4 +295,52 @@ mod tests {
         assert!(!should_give_up(MAX_ATTEMPTS - 1));
         assert!(should_give_up(MAX_ATTEMPTS));
     }
+    #[test]
+    fn dead_is_fully_terminal() {
+        // No event may leave Dead — including the CAS-racer NoOp path that
+        // previously let PushStarted through.
+        for ev in [
+            Event::PushStarted,
+            Event::PushOk,
+            Event::PushRejected { reason: "x".into() },
+            Event::PushErrored { reason: "x".into() },
+            Event::ReadReceipt,
+            Event::PollClaimed,
+            Event::Ack { note: None },
+            Event::GiveUp { reason: "x".into() },
+        ] {
+            assert!(apply(S::Dead, &ev).is_err(), "Dead must refuse {ev:?}");
+        }
+    }
+
+    #[test]
+    fn every_state_event_pair_has_a_verdict() {
+        // Exhaustive table audit: every (state, event) pair resolves to a
+        // legal transition, a benign NoOp, or an explicit refusal — never a
+        // panic, never an unhandled path.
+        let states = [
+            S::Queued,
+            S::Pushing,
+            S::Delivered,
+            S::Read,
+            S::Acked,
+            S::Dead,
+        ];
+        let events = [
+            Event::PushStarted,
+            Event::PushOk,
+            Event::PushRejected { reason: "r".into() },
+            Event::PushErrored { reason: "r".into() },
+            Event::ReadReceipt,
+            Event::PollClaimed,
+            Event::Ack { note: None },
+            Event::GiveUp { reason: "r".into() },
+        ];
+        for st in states {
+            for ev in &events {
+                let _ = apply(st, ev);
+            }
+        }
+    }
+
 }
