@@ -3,8 +3,22 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+
+# Latest run per ref wins; docs-only pushes trigger nothing (CI+CD used to
+# double-burn on every README/docs commit).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
