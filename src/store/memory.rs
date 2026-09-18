@@ -101,6 +101,130 @@ impl BusStore for InMemoryStore {
         Ok(m.clone())
     }
 
+    async fn mark_pushing(&self, agent: &str, id: &str) -> BusResult<bool> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        use crate::state::{apply, Event, Transition};
+        match apply(m.status, &Event::PushStarted) {
+            Ok(Transition::To(MessageStatus::Pushing)) => {
+                m.attempts += 1;
+                m.last_push_at = Some(chrono::Utc::now());
+                m.status = MessageStatus::Pushing;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn mark_push_ok(&self, agent: &str, id: &str) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let now = chrono::Utc::now();
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        Self::apply_event(m, &crate::state::Event::PushOk, now, |m| {
+            m.status = MessageStatus::Delivered;
+            m.delivered_at = Some(now);
+        });
+        Ok(m.clone())
+    }
+
+    async fn mark_push_failed(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let now = chrono::Utc::now();
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let event = if crate::state::should_give_up(m.attempts) {
+            crate::state::Event::GiveUp {
+                reason: reason.to_string(),
+            }
+        } else {
+            crate::state::Event::PushRejected {
+                reason: reason.to_string(),
+            }
+        };
+        let give_up = matches!(event, crate::state::Event::GiveUp { .. });
+        Self::apply_event(m, &event, now, |m| {
+            if give_up {
+                m.status = MessageStatus::Dead;
+            } else {
+                m.status = MessageStatus::Queued;
+            }
+        });
+        Ok(m.clone())
+    }
+
+    async fn reclaim_stale_pushing(
+        &self,
+        agent: &str,
+        id: &str,
+        reason: &str,
+    ) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let now = chrono::Utc::now();
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        Self::apply_event(
+            m,
+            &crate::state::Event::PushRejected {
+                reason: reason.to_string(),
+            },
+            now,
+            |m| {
+                m.status = MessageStatus::Queued;
+            },
+        );
+        Ok(m.clone())
+    }
+
+    async fn mark_dead(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let now = chrono::Utc::now();
+        let box_ = inner
+            .mailboxes
+            .get_mut(agent)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        let m = box_
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| BusError::NotFound(id.to_string()))?;
+        Self::apply_event(
+            m,
+            &crate::state::Event::GiveUp {
+                reason: reason.to_string(),
+            },
+            now,
+            |m| {
+                m.status = MessageStatus::Dead;
+            },
+        );
+        Ok(m.clone())
+    }
+
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
         let mut inner = self.inner.write().expect("store poisoned");
         let box_ = inner
@@ -245,6 +369,61 @@ impl BusStore for InMemoryStore {
 
     fn mailbox_capacity(&self) -> usize {
         self.capacity
+    }
+}
+
+/// State-machine funnel shared by the trait methods below (audit D6):
+/// one place that runs `apply` + bookkeeping instead of hand-rolled writes.
+impl InMemoryStore {
+    /// Shared mutating closure logic: find the letter, run the state machine
+    /// event through `apply`, write bookkeeping. Single funnel = audit D6
+    /// (transitions were previously hand-written per call site).
+    fn apply_event<F>(
+        m: &mut Message,
+        event: &crate::state::Event,
+        stamp: chrono::DateTime<chrono::Utc>,
+        f: F,
+    ) where
+        F: FnOnce(&mut Message),
+    {
+        use crate::state::{apply, Event, Transition};
+        // Attempt bookkeeping before the transition mutates status.
+        match event {
+            Event::PushStarted => {
+                m.attempts += 1;
+                m.last_push_at = Some(stamp);
+            }
+            Event::PushRejected { reason } | Event::PushErrored { reason } => {
+                m.last_error = Some(reason.clone());
+            }
+            Event::GiveUp { reason } => {
+                m.dead_reason = Some(reason.clone());
+            }
+            _ => {}
+        }
+        match apply(m.status, event) {
+            Ok(Transition::To(_)) => {
+                f(m);
+                // Post-transition timestamp bookkeeping (mirrors the truth table).
+                match (event, m.status) {
+                    (Event::PushOk, MessageStatus::Delivered) => m.delivered_at = Some(stamp),
+                    (Event::PollClaimed, MessageStatus::Delivered) => m.delivered_at = Some(stamp),
+                    (Event::ReadReceipt, MessageStatus::Read) => m.read_at = Some(stamp),
+                    (Event::Ack { note }, MessageStatus::Acked) => {
+                        m.acked_at = Some(stamp);
+                        m.ack_note = note.as_ref().map(|n| n.chars().take(80).collect());
+                        // v1.2.1 convention preserved: the audit trail keeps the
+                        // full chain even when acking straight from delivered.
+                        if m.read_at.is_none() {
+                            m.read_at = Some(stamp);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Transition::NoOp(_)) => {} // benign CAS loss; caller sees unchanged letter
+            Err(e) => eprintln!("🥔 state: id={} {e}", m.id),
+        }
     }
 }
 

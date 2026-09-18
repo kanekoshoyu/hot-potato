@@ -248,7 +248,12 @@ impl PushTransport for HttpTransport {
                     .get("contextId")
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("bus-{}", letter.get("id").and_then(|v| v.as_str()).unwrap_or("anon")));
+                    .unwrap_or_else(|| {
+                        format!(
+                            "bus-{}",
+                            letter.get("id").and_then(|v| v.as_str()).unwrap_or("anon")
+                        )
+                    });
                 let payload = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 0,
@@ -275,14 +280,27 @@ impl PushTransport for HttpTransport {
                         if resp.status().is_success() {
                             Ok(())
                         } else {
-                            // 4xx/5xx: endpoint exists but rejected — treat as
-                            // notified (task may still have been accepted async).
-                            Ok(())
+                            // v1.2.4 HONEST RECEIPTS (state-machine audit D1): a
+                            // refusal is NOT a delivery. The old code mapped 4xx/5xx
+                            // to Ok(()) ("treat as notified"), which produced letters
+                            // marked delivered that the receiver never saw (verified
+                            // production incident 2026-09-18, letter 5eabea39). Now a
+                            // refusal is an error → the letter stays queued and the
+                            // sweeper retries with backoff.
+                            Err(format!(
+                                "a2a push rejected: HTTP {} from {url}",
+                                resp.status()
+                            ))
                         }
                     }
                     Err(e) if e.is_timeout() => {
-                        // Timed out waiting for the agent's synchronous reply:
-                        // the task was injected. Fire-and-forget success.
+                        // Timed out waiting for the agent's synchronous reply: the
+                        // task was injected and is being processed (verified live
+                        // 2026-09-10: gateway journal shows the task arriving +
+                        // BrokenPipe when the bus gives up first). Count as notified —
+                        // marking it failed instead would make the sweeper re-push
+                        // every letter whose agent turn exceeds the client timeout,
+                        // spamming receivers with duplicates.
                         Ok(())
                     }
                     Err(e) => Err(format!("a2a push failed: {e}")),
@@ -335,6 +353,23 @@ pub enum PushOutcome {
     Skipped { reason: String },
 }
 
+/// One structured line per push attempt — the observability that was missing
+/// (audit D3/P3): push outcomes used to live only in the synchronous send
+/// response, making delivery failures undebuggable after the fact.
+pub fn log_push_outcome(letter_id: &str, receiver: &str, outcome: &PushOutcome) {
+    match outcome {
+        PushOutcome::Pushed => {
+            eprintln!("🥔 push: id={letter_id} to={receiver} outcome=pushed");
+        }
+        PushOutcome::Failed { error } => {
+            eprintln!("🥔 push: id={letter_id} to={receiver} outcome=failed error={error:?}");
+        }
+        PushOutcome::Skipped { reason } => {
+            eprintln!("🥔 push: id={letter_id} to={receiver} outcome=skipped reason={reason:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,16 +395,24 @@ mod tests {
     #[tokio::test]
     async fn registry_register_tagged_persists_and_preserves() {
         let reg = Registry::new();
-        reg.register_tagged("alice", "pm", DeliverVia::Poll,
-                            vec!["fleet".into(), "pm-office".into()]).await;
+        reg.register_tagged(
+            "alice",
+            "pm",
+            DeliverVia::Poll,
+            vec!["fleet".into(), "pm-office".into()],
+        )
+        .await;
         let e = reg.lookup("alice").await.unwrap();
         assert_eq!(e.tags, vec!["fleet", "pm-office"]);
         // Re-register without tags → tags preserved (idempotent upgrade-safe).
         reg.register("alice", "pm", DeliverVia::Poll).await;
-        assert_eq!(reg.lookup("alice").await.unwrap().tags, vec!["fleet", "pm-office"]);
+        assert_eq!(
+            reg.lookup("alice").await.unwrap().tags,
+            vec!["fleet", "pm-office"]
+        );
         // Explicit new tags replace.
-        reg.register_tagged("alice", "pm", DeliverVia::Poll,
-                            vec!["sho-pool".into()]).await;
+        reg.register_tagged("alice", "pm", DeliverVia::Poll, vec!["sho-pool".into()])
+            .await;
         assert_eq!(reg.lookup("alice").await.unwrap().tags, vec!["sho-pool"]);
         // Untagged agents default to empty, not garbage.
         reg.register("erin", "worker", DeliverVia::Poll).await;

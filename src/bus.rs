@@ -144,6 +144,42 @@ impl EventBus {
         self.store.mark_delivered(agent, id).await
     }
 
+    // ── Declarative state machine wrappers (v1.2.4) ────────────────────────
+    // Every push-path state change goes through these; the truth table lives
+    // in state.rs and the store funnels all mutations through `apply`.
+
+    /// CAS claim before a push: Queued → Pushing. Ok(false) = someone else
+    /// owns the letter (racing dispatcher/sweeper) — skip it.
+    pub async fn claim_push(&self, agent: &str, id: &str) -> BusResult<bool> {
+        self.store.mark_pushing(agent, id).await
+    }
+
+    /// Push succeeded: Pushing → Delivered (honest receipt).
+    pub async fn push_succeeded(&self, agent: &str, id: &str) -> BusResult<Message> {
+        self.store.mark_push_ok(agent, id).await
+    }
+
+    /// Push failed honestly: Pushing → Queued (retry) or Dead (attempts out).
+    pub async fn push_failed(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
+        self.store.mark_push_failed(agent, id, reason).await
+    }
+
+    /// Reclaim a letter whose push outcome never arrived (Pushing → Queued).
+    pub async fn reclaim_stale_pushing(
+        &self,
+        agent: &str,
+        id: &str,
+        reason: &str,
+    ) -> BusResult<Message> {
+        self.store.reclaim_stale_pushing(agent, id, reason).await
+    }
+
+    /// Declare a letter Dead (terminal) — operator or poison-threshold action.
+    pub async fn mark_dead(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
+        self.ensure_registered(agent).await?;
+        self.store.mark_dead(agent, id, reason).await
+    }
+
     /// Read receipt: I opened it (chatlog `read_at` timestamp).
     pub async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
         self.ensure_registered(agent).await?;
@@ -347,8 +383,14 @@ mod tests {
     #[tokio::test]
     async fn delete_one_removes_exactly_that_letter() {
         let b = bus().await;
-        let keep = b.send("alice", "bob", MsgType::Task, "keep", "b", None).await.unwrap();
-        let kill = b.send("alice", "bob", MsgType::Task, "kill", "b", None).await.unwrap();
+        let keep = b
+            .send("alice", "bob", MsgType::Task, "keep", "b", None)
+            .await
+            .unwrap();
+        let kill = b
+            .send("alice", "bob", MsgType::Task, "kill", "b", None)
+            .await
+            .unwrap();
         b.delete_letter(&kill).await.unwrap();
         assert!(b.delete_letter(&kill).await.is_err()); // gone — second delete 404s
         let listed = b.list_all().await.unwrap();
@@ -359,8 +401,13 @@ mod tests {
     #[tokio::test]
     async fn delete_all_clears_every_status() {
         let b = bus().await;
-        b.send("alice", "bob", MsgType::Task, "queued", "b", None).await.unwrap();
-        let did = b.send("alice", "bob", MsgType::Task, "delivered", "b", None).await.unwrap();
+        b.send("alice", "bob", MsgType::Task, "queued", "b", None)
+            .await
+            .unwrap();
+        let did = b
+            .send("alice", "bob", MsgType::Task, "delivered", "b", None)
+            .await
+            .unwrap();
         b.poll("bob", 0).await.unwrap();
         b.ack("bob", &did, "done").await.unwrap();
         let n = b.delete_all_letters().await.unwrap();

@@ -21,6 +21,7 @@ pub mod handshake;
 pub mod message;
 pub mod openapi;
 pub mod server;
+pub mod state;
 pub mod store;
 pub mod sweeper;
 pub mod ws;

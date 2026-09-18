@@ -47,16 +47,17 @@ pub const MIN_BACKOFF: Duration = Duration::from_secs(60);
 /// window: 1m, 2m, 4m, 8m, 16m, 32m (capped). Stateless — derived from age.
 pub fn retry_window(age: Duration, min_backoff: Duration) -> Duration {
     let step = min_backoff.as_secs().max(1);
-    let attempts = (age.as_secs() / step)
-        .checked_ilog2()
-        .unwrap_or(0)
-        .min(5);
+    let attempts = (age.as_secs() / step).checked_ilog2().unwrap_or(0).min(5);
     Duration::from_secs(step << attempts)
 }
 
 /// Re-push every queued letter whose backoff window has elapsed. Returns how
-/// many letters were pushed (and marked delivered). Failures wait for the
-/// next sweep; nothing here can lose a letter — worst case is staying queued.
+/// many letters were pushed. Honest-failure semantics (2026-09-18 rewrite):
+/// a refused push keeps the letter queued and records attempts/last_error;
+/// after `MAX_ATTEMPTS` failures the letter goes terminal `Dead` instead of
+/// retrying forever. Stale `Pushing` letters (dispatcher died mid-push) are
+/// reclaimed to queued first. Nothing here can silently lose a letter — the
+/// worst case is a visible Dead letter with a reason attached.
 pub async fn sweep_once(
     bus: &Arc<EventBus>,
     registry: &Arc<Registry>,
@@ -64,9 +65,34 @@ pub async fn sweep_once(
     hub: &Arc<crate::ws::EventHub>,
     min_backoff: Duration,
 ) -> usize {
-    let Ok(all) = bus.list_all().await else { return 0 };
+    let Ok(all) = bus.list_all().await else {
+        return 0;
+    };
     let now = chrono::Utc::now();
     let mut pushed = 0usize;
+
+    // Liveness recovery (audit D2): a letter stuck in Pushing past the window
+    // means its dispatcher died between PushStarted and the outcome. Reclaim
+    // to Queued so the normal retry path below can pick it up again.
+    for letter in all
+        .iter()
+        .filter(|l| l.status == crate::message::MessageStatus::Pushing)
+    {
+        let stale_for = (now - letter.last_push_at.unwrap_or(letter.created_at)).num_seconds();
+        if stale_for > crate::state::PUSHING_TIMEOUT_SECS {
+            let _ = bus
+                .reclaim_stale_pushing(
+                    &letter.receiver,
+                    &letter.id,
+                    &format!("pushing stale {stale_for}s (dispatcher died mid-push)"),
+                )
+                .await;
+        }
+    }
+
+    let Ok(all) = bus.list_all().await else {
+        return 0;
+    };
     for letter in all
         .iter()
         .filter(|l| l.status == crate::message::MessageStatus::Queued)
@@ -77,6 +103,8 @@ pub async fn sweep_once(
         if min_backoff > Duration::ZERO && age < retry_window(age, min_backoff) {
             continue;
         }
+        // Dead letters are never touched (terminal); Pushing letters are owned
+        // by a live dispatcher (CAS claim below also guards this).
         let mut push_letter = serde_json::to_value(letter).expect("letter json");
         // v1.2.0: per-thread A2A contextId — resolve the thread root once per
         // letter so receivers keep reusing the session they already have.
@@ -84,12 +112,44 @@ pub async fn sweep_once(
             "bus-t-{}",
             crate::message::Message::thread_root_id(&all, &letter.id)
         ));
-        if let PushOutcome::Pushed =
-            dispatch_push(registry, transport, &letter.receiver, &push_letter).await
+
+        // CAS claim: Queued → Pushing. If we don't win (dispatcher racing),
+        // skip — the winner owns the outcome.
+        if !bus
+            .claim_push(&letter.receiver, &letter.id)
+            .await
+            .unwrap_or(false)
         {
-            if let Ok(m) = bus.mark_delivered(&letter.receiver, &letter.id).await {
-                hub.emit("delivered", &m);
-                pushed += 1;
+            continue;
+        }
+
+        let outcome = dispatch_push(registry, transport, &letter.receiver, &push_letter).await;
+        crate::deliver::log_push_outcome(&letter.id, &letter.receiver, &outcome);
+        match outcome {
+            PushOutcome::Pushed => {
+                if let Ok(m) = bus.push_succeeded(&letter.receiver, &letter.id).await {
+                    hub.emit("delivered", &m);
+                    pushed += 1;
+                }
+            }
+            PushOutcome::Failed { error } => {
+                // Honest failure: Pushing → Queued (sweeper retries with
+                // backoff), or → Dead once attempts are exhausted.
+                if let Ok(m) = bus.push_failed(&letter.receiver, &letter.id, &error).await {
+                    if m.status == crate::message::MessageStatus::Dead {
+                        eprintln!(
+                            "🥔 sweeper: letter {} declared DEAD after {} attempts: {error}",
+                            letter.id, m.attempts
+                        );
+                    }
+                }
+            }
+            PushOutcome::Skipped { reason } => {
+                // Nothing was attempted — release the claim so a later sweep
+                // (or the register re-push) can take it.
+                let _ = bus
+                    .reclaim_stale_pushing(&letter.receiver, &letter.id, &reason)
+                    .await;
             }
         }
     }
@@ -181,13 +241,17 @@ mod tests {
     async fn bus_with_registry() -> (Arc<EventBus>, Arc<Registry>) {
         let bus = Arc::new(EventBus::new(Arc::new(InMemoryStore::new())));
         bus.register("alice", crate::bus::Role::Pm).await.unwrap();
-        bus.register("carol", crate::bus::Role::Worker).await.unwrap();
+        bus.register("carol", crate::bus::Role::Worker)
+            .await
+            .unwrap();
         let registry = Arc::new(Registry::new());
         registry
             .register(
                 "carol",
                 "test",
-                DeliverVia::Webhook { url: "http://mock".into() },
+                DeliverVia::Webhook {
+                    url: "http://mock".into(),
+                },
             )
             .await;
         (bus, registry)
@@ -211,7 +275,54 @@ mod tests {
         // 2nd sweep: transport recovered → delivered
         let n = sweep_once(&bus, &registry, &transport, &hub, Duration::ZERO).await;
         assert_eq!(n, 1);
-        assert_eq!(count_queued(&bus).await, 0, "sweep must mark delivered on push success");
+        assert_eq!(
+            count_queued(&bus).await,
+            0,
+            "sweep must mark delivered on push success"
+        );
+    }
+
+    /// Always refuses — the lying-receipt E2E: a 4xx-style rejection must
+    /// NEVER flip the letter to delivered, and must go Dead (not retry
+    /// forever) once attempts are exhausted.
+    struct RejectingTransport;
+
+    #[async_trait::async_trait]
+    impl PushTransport for RejectingTransport {
+        async fn push(&self, _t: &DeliverVia, _l: &serde_json::Value) -> Result<(), String> {
+            Err("401 invalid token".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_pushes_stay_queued_then_go_dead() {
+        let (bus, registry) = bus_with_registry().await;
+        let hub = Arc::new(crate::ws::EventHub::new());
+        let transport: Arc<dyn PushTransport> = Arc::new(RejectingTransport);
+
+        let id = bus
+            .send("alice", "carol", MsgType::Task, "poison", "body", None)
+            .await
+            .unwrap();
+
+        // MAX_ATTEMPTS sweeps: every push is refused.
+        for i in 0..crate::state::MAX_ATTEMPTS {
+            let n = sweep_once(&bus, &registry, &transport, &hub, Duration::ZERO).await;
+            assert_eq!(n, 0, "refused push must not claim delivery (sweep {i})");
+        }
+        // After MAX_ATTEMPTS failed pushes the letter is terminal Dead with
+        // the last error attached — visible, not silently lost, NOT delivered.
+        let letters = bus.list_all().await.unwrap();
+        let m = letters.iter().find(|l| l.id == id).unwrap();
+        assert_eq!(
+            m.status,
+            crate::message::MessageStatus::Dead,
+            "poison letter must die honestly, got {:?}",
+            m.status
+        );
+        assert_eq!(m.attempts, crate::state::MAX_ATTEMPTS);
+        assert_eq!(m.last_error.as_deref(), Some("401 invalid token"));
+        assert!(m.delivered_at.is_none(), "dead ≠ delivered");
     }
 
     #[tokio::test]
@@ -251,9 +362,16 @@ mod tests {
 
         // Letter to an agent with a mailbox but no push registry entry.
         bus.register("sho", crate::bus::Role::Worker).await.unwrap();
-        bus.send("alice", "sho", MsgType::Task, "to a poll-only human", "body", None)
-            .await
-            .unwrap();
+        bus.send(
+            "alice",
+            "sho",
+            MsgType::Task,
+            "to a poll-only human",
+            "body",
+            None,
+        )
+        .await
+        .unwrap();
 
         let n = sweep_once(&bus, &registry, &transport, &hub, Duration::ZERO).await;
         assert_eq!(n, 0, "no push registry entry → skipped");

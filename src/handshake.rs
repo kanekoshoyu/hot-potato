@@ -42,11 +42,7 @@ impl Invite {
     pub fn new(inviter_url: &str) -> Self {
         let now = chrono::Utc::now();
         let payload = serde_json::json!({ "url": inviter_url }).to_string();
-        let code = format!(
-            "hp-{}-{}",
-            Uuid::new_v4().simple(),
-            b64url_encode(&payload)
-        );
+        let code = format!("hp-{}-{}", Uuid::new_v4().simple(), b64url_encode(&payload));
         Self {
             code,
             created_at: now,

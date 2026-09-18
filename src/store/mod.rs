@@ -33,6 +33,34 @@ pub trait BusStore: Send + Sync {
     /// "left the shelf" without a poll.
     async fn mark_delivered(&self, agent: &str, id: &str) -> BusResult<Message>;
 
+    /// CAS claim before a push: Queued → Pushing via the declarative state
+    /// machine. Returns Ok(true) if this caller won the right to push,
+    /// Ok(false) if another dispatcher/sweeper already holds the letter
+    /// (Pushing) or it left Queued — the caller must skip. (Audit D2:
+    /// anti double-delivery.)
+    async fn mark_pushing(&self, agent: &str, id: &str) -> BusResult<bool>;
+
+    /// Push succeeded: Pushing → Delivered (via `push_ok`).
+    async fn mark_push_ok(&self, agent: &str, id: &str) -> BusResult<Message>;
+
+    /// Push failed honestly: Pushing → Queued, recording the error and
+    /// checking the poison threshold (audit D1/D3/D4). Returns the letter;
+    /// `dead == true` on the returned letter means attempts ran out and the
+    /// caller must NOT retry further.
+    async fn mark_push_failed(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message>;
+
+    /// Reclaim a letter stuck in Pushing past the liveness window (crash
+    /// between PushStarted and the outcome): Pushing → Queued.
+    async fn reclaim_stale_pushing(
+        &self,
+        agent: &str,
+        id: &str,
+        reason: &str,
+    ) -> BusResult<Message>;
+
+    /// Operator/poison judgment: → Dead terminal state with a reason.
+    async fn mark_dead(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message>;
+
     /// Mark one delivered message as read (chatlog receipt: `read_at` set).
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message>;
 

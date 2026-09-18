@@ -135,6 +135,130 @@ impl BusStore for SledStore {
         .await
     }
 
+    async fn mark_pushing(&self, agent: &str, id: &str) -> BusResult<bool> {
+        use crate::state::{apply, Event, Transition};
+        let mut won = false;
+        let out = self
+            .update_one(agent, id, |m| {
+                match apply(m.status, &Event::PushStarted) {
+                    Ok(Transition::To(MessageStatus::Pushing)) => {
+                        m.attempts += 1;
+                        m.last_push_at = Some(chrono::Utc::now());
+                        m.status = MessageStatus::Pushing;
+                        won = true;
+                    }
+                    _ => {} // CAS loss (racer won) or illegal — no state change
+                }
+                Ok(())
+            })
+            .await;
+        match out {
+            Ok(_) => Ok(won),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn mark_push_ok(&self, agent: &str, id: &str) -> BusResult<Message> {
+        let now = chrono::Utc::now();
+        self.update_one(agent, id, |m| {
+            use crate::state::{apply, Event, Transition};
+            match apply(m.status, &Event::PushOk) {
+                Ok(Transition::To(to)) => {
+                    m.status = to;
+                    if to == MessageStatus::Delivered {
+                        m.delivered_at = Some(now);
+                    }
+                }
+                Ok(Transition::NoOp(_)) => {}
+                Err(e) => eprintln!("🥔 state: id={} {e}", m.id),
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn mark_push_failed(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
+        let now = chrono::Utc::now();
+        self.update_one(agent, id, |m| {
+            use crate::state::{apply, Event, Transition};
+            m.last_error = Some(reason.to_string());
+            let event = if crate::state::should_give_up(m.attempts) {
+                Event::GiveUp {
+                    reason: reason.to_string(),
+                }
+            } else {
+                Event::PushRejected {
+                    reason: reason.to_string(),
+                }
+            };
+            let give_up = matches!(event, Event::GiveUp { .. });
+            match apply(m.status, &event) {
+                Ok(Transition::To(to)) => {
+                    m.status = to;
+                    if give_up {
+                        m.dead_reason = Some(reason.to_string());
+                    }
+                    Ok(())
+                }
+                Ok(Transition::NoOp(_)) => Ok(()),
+                Err(e) => {
+                    eprintln!("🥔 state: id={} {e}", m.id);
+                    Ok(())
+                }
+            }
+        })
+        .await
+    }
+
+    async fn reclaim_stale_pushing(
+        &self,
+        agent: &str,
+        id: &str,
+        reason: &str,
+    ) -> BusResult<Message> {
+        let now = chrono::Utc::now();
+        self.update_one(agent, id, |m| {
+            use crate::state::{apply, Event, Transition};
+            m.last_error = Some(reason.to_string());
+            match apply(
+                m.status,
+                &Event::PushRejected {
+                    reason: reason.to_string(),
+                },
+            ) {
+                Ok(Transition::To(to)) => m.status = to,
+                Ok(Transition::NoOp(_)) => {}
+                Err(e) => eprintln!("🥔 state: id={} {e}", m.id),
+            }
+            let _ = now;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn mark_dead(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
+        self.update_one(agent, id, |m| {
+            use crate::state::{apply, Event, Transition};
+            match apply(
+                m.status,
+                &Event::GiveUp {
+                    reason: reason.to_string(),
+                },
+            ) {
+                Ok(Transition::To(to)) => {
+                    m.status = to;
+                    if to == MessageStatus::Dead {
+                        m.dead_reason = Some(reason.to_string());
+                    }
+                }
+                Ok(Transition::NoOp(_)) => {}
+                Err(e) => eprintln!("🥔 state: id={} {e}", m.id),
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message> {
         self.update_one(agent, id, |m| {
             if m.status != MessageStatus::Delivered {
@@ -248,7 +372,8 @@ impl BusStore for SledStore {
     }
 
     async fn unregister(&self, agent: &str) -> BusResult<()> {
-        self.db.remove(format!("__agent__::{agent}").into_bytes())
+        self.db
+            .remove(format!("__agent__::{agent}").into_bytes())
             .map_err(sled_err)?;
         Ok(())
     }

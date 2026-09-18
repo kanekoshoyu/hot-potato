@@ -44,7 +44,9 @@ async fn rpc_call(app: &Router, method: &str, params: Value) -> Value {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     serde_json::from_slice::<Value>(&bytes).unwrap()["result"].clone()
 }
 
@@ -59,8 +61,13 @@ async fn bus_with_aged_letters() -> Arc<EventBus> {
     let ages = [10i64, 70, 300, 900, 3000, 10800];
     for age in ages {
         let mut m = hot_potato::message::Message::new(
-            "alice", "erin", hot_potato::message::MsgType::AckOnly,
-            format!("age-{}", age), "x", None);
+            "alice",
+            "erin",
+            hot_potato::message::MsgType::AckOnly,
+            format!("age-{}", age),
+            "x",
+            None,
+        );
         m.created_at = chrono::Utc::now() - chrono::Duration::seconds(age);
         store.push(&m).await.unwrap();
     }
@@ -77,14 +84,14 @@ async fn freshness_window_matrix() {
     // (age <= 0) — effectively "nothing". The dashboard's "all history" option
     // OMITS the param instead. 0 is tested to pin that exact API semantics.
     let cases: Vec<(Option<i64>, usize)> = vec![
-        (None, 6),          // no filter -> all 6
-        (Some(0), 0),       // 0 = age<=0 -> nothing (documented quirk)
-        (Some(30), 1),      // 30s window -> only the 10s letter
-        (Some(60), 1),      // 1 min -> 10s
-        (Some(120), 2),     // 2 min -> 10s + 70s   (Sho's case: 5-min MUST NOT show)
-        (Some(3600), 5),    // 1 h -> all but the 3h letter (15-min letter MUST show)
-        (Some(7200), 5),    // 2 h -> same 5
-        (Some(86400), 6),   // 24 h -> all 6
+        (None, 6),        // no filter -> all 6
+        (Some(0), 0),     // 0 = age<=0 -> nothing (documented quirk)
+        (Some(30), 1),    // 30s window -> only the 10s letter
+        (Some(60), 1),    // 1 min -> 10s
+        (Some(120), 2),   // 2 min -> 10s + 70s   (Sho's case: 5-min MUST NOT show)
+        (Some(3600), 5),  // 1 h -> all but the 3h letter (15-min letter MUST show)
+        (Some(7200), 5),  // 2 h -> same 5
+        (Some(86400), 6), // 24 h -> all 6
     ];
 
     for (window, expect) in cases {
@@ -94,7 +101,11 @@ async fn freshness_window_matrix() {
         }
         let res = rpc_call(&app, "message/list", params).await;
         let got = res.as_array().unwrap().len();
-        assert_eq!(got, expect, "window {:?}: expected {} letters, got {}", window, expect, got);
+        assert_eq!(
+            got, expect,
+            "window {:?}: expected {} letters, got {}",
+            window, expect, got
+        );
     }
 
     // spot-check Sho's exact scenario: 1h window must INCLUDE the 15-min letter
@@ -105,10 +116,21 @@ async fn freshness_window_matrix() {
         .iter()
         .map(|l| l["subject"].as_str().unwrap().to_string())
         .collect();
-    assert!(subjects.contains(&"age-900".to_string()), "15-min letter must be visible in 1h window");
-    assert!(!subjects.contains(&"age-10800".to_string()), "3h letter must NOT be visible in 1h window");
+    assert!(
+        subjects.contains(&"age-900".to_string()),
+        "15-min letter must be visible in 1h window"
+    );
+    assert!(
+        !subjects.contains(&"age-10800".to_string()),
+        "3h letter must NOT be visible in 1h window"
+    );
 
     // combined with status filter: queued + 2min window
-    let res = rpc_call(&app, "message/list", json!({"max_age_secs": 120, "status": "queued"})).await;
+    let res = rpc_call(
+        &app,
+        "message/list",
+        json!({"max_age_secs": 120, "status": "queued"}),
+    )
+    .await;
     assert_eq!(res.as_array().unwrap().len(), 2);
 }
