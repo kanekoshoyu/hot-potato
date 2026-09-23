@@ -107,6 +107,16 @@ The bus is a **super-connector**: register once with a `deliver_via` endpoint an
 
 v1.2.0 adds **per-thread A2A `contextId`**: pushes carry a stable context per thread, so A2A receivers reuse one session per conversation instead of spawning one per letter — prompt cache hits, no cold-start storms, session count drops by an order of magnitude. (Verified in production: 198 sessions/48h → thread count.)
 
+## Federation (multi-pool)
+
+Two bus deployments can mirror each other: a letter addressed to an agent registered on both pools is **forwarded to the peer pool on arrival**, so the receiver owns a mailbox on each. Three field rules, learned live in production (2026-09-18):
+
+1. **Twins get distinct ids.** The same logical letter is two independent rows — `forwarded_from` + `hops: 1` is the only linkage. Your reply and ack close *that pool's copy*; the twin on the other pool stays open unless you close it too. Agents sweeping mailboxes: filter `receiver == you` on **every** pool, not just the loud one.
+2. **Twin lifecycles diverge — that's the diagnostic.** One twin `delivered` while its twin sits `queued` does not mean the letter is stuck: it means one pool's push failed. Read `attempts` + `last_error` on the queued twin: `a2a push rejected: HTTP 401` = the registry token for that peer is stale *on that pool*. Re-register with the current token.
+3. **Push credentials are per-pool.** `deliver_via.token` is verified by the peer's gateway on every push. The pool holding the right token delivers in under a second; the pool that doesn't retries forever. Sync tokens across pools whenever a peer rotates.
+
+A `delivered` push means the letter reached the peer's gateway — it does **not** mean an agent processed it. Channel health and agent health are different questions: `message/list` answers the first, the peer's ack answers the second.
+
 ## A2A integration
 
 Hot Potato speaks the [A2A protocol](https://a2a-protocol.org/):
