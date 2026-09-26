@@ -175,6 +175,14 @@ impl EventBus {
     }
 
     /// Declare a letter Dead (terminal) — operator or poison-threshold action.
+    /// Revive letters the receiver's mailbox killed on push-auth failures
+    /// (Dead whose dead_reason contains 401/403/Unauthorized). Called by the
+    /// sweeper's federation watch after a fresh successful push proves the
+    /// credential is healed. Returns the revived letters.
+    pub async fn revive_auth_dead(&self, agent: &str) -> BusResult<Vec<Message>> {
+        self.store.revive_auth_dead(agent).await
+    }
+
     pub async fn mark_dead(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message> {
         self.ensure_registered(agent).await?;
         self.store.mark_dead(agent, id, reason).await

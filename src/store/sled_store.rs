@@ -182,7 +182,13 @@ impl BusStore for SledStore {
         self.update_one(agent, id, |m| {
             use crate::state::{apply, Event, Transition};
             m.last_error = Some(reason.to_string());
-            let event = if crate::state::should_give_up(m.attempts) {
+            // v1.3.2 auth-death guard: never GiveUp on recoverable credential
+            // errors — keep the letter Queued (bus/diagnose shows it); revive
+            // path restores anything that already died on auth.
+            let auth_err = reason.contains("401")
+                || reason.contains("403")
+                || reason.contains("Unauthorized");
+            let event = if crate::state::should_give_up(m.attempts) && !auth_err {
                 Event::GiveUp {
                     reason: reason.to_string(),
                 }
@@ -208,6 +214,47 @@ impl BusStore for SledStore {
             }
         })
         .await
+    }
+
+    async fn revive_auth_dead(&self, agent: &str) -> BusResult<Vec<crate::message::Message>> {
+        use crate::state::{apply, Event, Transition};
+        let mut revived = Vec::new();
+        // Snapshot candidates read-only first, then apply the real state
+        // event per letter via update_one (single writer, truth-table path).
+        let candidates: Vec<String> = self
+            .collect(|m| {
+                m.receiver == agent
+                    && m.status == crate::message::MessageStatus::Dead
+                    && m.dead_reason.as_deref().map_or(false, |e| {
+                        e.contains("401") || e.contains("403") || e.contains("Unauthorized")
+                    })
+            })
+            .await?
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        for id in candidates {
+            let out = self
+                .update_one(agent, &id, |m| {
+                    match apply(m.status, &Event::ReviveAuth) {
+                        Ok(Transition::To(to)) => {
+                            m.status = to;
+                            m.dead_reason = None;
+                            m.last_error = None;
+                            m.attempts = 0;
+                            Ok(())
+                        }
+                        _ => Ok(()), // raced/revived elsewhere: no-op
+                    }
+                })
+                .await;
+            if let Ok(m) = out {
+                if m.status == crate::message::MessageStatus::Queued {
+                    revived.push(m);
+                }
+            }
+        }
+        Ok(revived)
     }
 
     async fn reclaim_stale_pushing(

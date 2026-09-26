@@ -333,6 +333,20 @@ async fn federation_watch_once(
                 tags,
             )
             .await;
+        // v1.3.2 auth-revive: the re-register above re-armed this receiver's
+        // credential. Anything that already DIED on a 401/403 during the
+        // outage (before the auth-death guard) gets re-queued so the next
+        // sweep re-pushes it under the healed credential.
+        match bus.revive_auth_dead(receiver).await {
+            Ok(revived) if !revived.is_empty() => {
+                eprintln!(
+                    "🥔 watch: revived {} auth-dead letter(s) for `{receiver}` after re-register",
+                    revived.len()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("🥔 watch: revive_auth_dead({receiver}) failed: {e}"),
+        }
         // Re-arm the register re-push inline (same receipt path as the RPC).
         let Ok(queued) = bus.peek(receiver).await else { continue };
         for letter in queued {
@@ -482,16 +496,115 @@ mod tests {
         );
     }
 
-    /// Always refuses — the lying-receipt E2E: a 4xx-style rejection must
-    /// NEVER flip the letter to delivered, and must go Dead (not retry
-    /// forever) once attempts are exhausted.
+    /// Always refuses with a NON-auth error — the lying-receipt E2E: a hard
+    /// 4xx/5xx-style rejection must NEVER flip the letter to delivered, and
+    /// genuine poison must go Dead (not retry forever) after attempts run out.
+    /// (v1.3.2: auth-shaped errors are handled by the revive tests below —
+    /// they no longer die by design.)
     struct RejectingTransport;
 
     #[async_trait::async_trait]
     impl PushTransport for RejectingTransport {
         async fn push(&self, _t: &DeliverVia, _l: &serde_json::Value) -> Result<(), String> {
-            Err("401 invalid token".into())
+            Err("503 service unavailable".into())
         }
+    }
+
+    /// v1.3.2 auth-death guard: an AUTH refusal (401) must never exhaust into
+    /// Dead — the credential is recoverable, so the letter stays Queued forever
+    /// (visible in bus/diagnose) instead of dying after MAX_ATTEMPTS.
+    #[tokio::test]
+    async fn auth_refusals_never_let_letters_die() {
+        struct AuthRefuser;
+        #[async_trait::async_trait]
+        impl PushTransport for AuthRefuser {
+            async fn push(&self, _t: &DeliverVia, _l: &serde_json::Value) -> Result<(), String> {
+                Err("a2a push rejected: HTTP 401 Unauthorized from http://x:9901/".into())
+            }
+        }
+        let (bus, registry) = bus_with_registry().await;
+        let hub = Arc::new(crate::ws::EventHub::new());
+        let transport: Arc<dyn PushTransport> = Arc::new(AuthRefuser);
+
+        let id = bus
+            .send("alice", "carol", MsgType::Task, "auth outage", "body", None)
+            .await
+            .unwrap();
+
+        // Far beyond MAX_ATTEMPTS: every sweep re-queues, none declares death.
+        for i in 0..(crate::state::MAX_ATTEMPTS as usize + 5) {
+            let _ = sweep_once(&bus, &registry, &transport, &hub, Duration::ZERO).await;
+        }
+        let letters = bus.list_all().await.unwrap();
+        let m = letters.iter().find(|l| l.id == id).unwrap();
+        assert_eq!(
+            m.status,
+            crate::message::MessageStatus::Queued,
+            "auth failure must keep the letter retryable, got {:?}",
+            m.status
+        );
+        assert!(m.delivered_at.is_none());
+        assert!(m
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Unauthorized"));
+    }
+
+    /// v1.3.2 revive path: an auth-dead letter (pre-guard legacy state) is
+    /// revived to Queued by revive_auth_dead, and the next sweep with a
+    /// healed transport delivers it. Simulates the 2026-09-26 fleet incident
+    /// (2 letters dead on 401 from 46.250.228.187:9901) getting self-healed.
+    #[tokio::test]
+    async fn revive_auth_dead_restores_and_redelivers() {
+        struct AuthRefuser;
+        #[async_trait::async_trait]
+        impl PushTransport for AuthRefuser {
+            async fn push(&self, _t: &DeliverVia, _l: &serde_json::Value) -> Result<(), String> {
+                Err("a2a push rejected: HTTP 401 Unauthorized".into())
+            }
+        }
+        let (bus, registry) = bus_with_registry().await;
+        let hub = Arc::new(crate::ws::EventHub::new());
+        let dead_transport: Arc<dyn PushTransport> = Arc::new(AuthRefuser);
+
+        let id = bus
+            .send("alice", "carol", MsgType::Task, "legacy dead", "body", None)
+            .await
+            .unwrap();
+
+        // Legacy path: burn it to Dead with the OLD behavior (reason is auth
+        // but this store build predates the guard — force GiveUp via mark_dead).
+        let _ = bus.mark_dead("carol", &id, "a2a push rejected: HTTP 401 Unauthorized").await;
+        let letters = bus.list_all().await.unwrap();
+        assert_eq!(
+            letters.iter().find(|l| l.id == id).unwrap().status,
+            crate::message::MessageStatus::Dead,
+            "setup: letter must be dead before revive"
+        );
+
+        // Credential heals: revive, then the sweeper delivers with a good transport.
+        let revived = bus.revive_auth_dead("carol").await.unwrap();
+        assert_eq!(revived.len(), 1, "the 401-dead letter must revive");
+        assert_eq!(revived[0].id, id);
+        assert_eq!(revived[0].status, crate::message::MessageStatus::Queued);
+        assert_eq!(revived[0].attempts, 0);
+
+        struct GoodTransport;
+        #[async_trait::async_trait]
+        impl PushTransport for GoodTransport {
+            async fn push(&self, _t: &DeliverVia, _l: &serde_json::Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let good: Arc<dyn PushTransport> = Arc::new(GoodTransport);
+        let n = sweep_once(&bus, &registry, &good, &hub, Duration::ZERO).await;
+        assert_eq!(n, 1, "revived letter must push on the healed credential");
+        let letters = bus.list_all().await.unwrap();
+        assert_eq!(
+            letters.iter().find(|l| l.id == id).unwrap().status,
+            crate::message::MessageStatus::Delivered,
+        );
     }
 
     #[tokio::test]
@@ -521,7 +634,7 @@ mod tests {
             m.status
         );
         assert_eq!(m.attempts, crate::state::MAX_ATTEMPTS);
-        assert_eq!(m.last_error.as_deref(), Some("401 invalid token"));
+        assert_eq!(m.last_error.as_deref(), Some("503 service unavailable"));
         assert!(m.delivered_at.is_none(), "dead ≠ delivered");
     }
 
