@@ -61,6 +61,11 @@ pub trait BusStore: Send + Sync {
     /// Operator/poison judgment: → Dead terminal state with a reason.
     async fn mark_dead(&self, agent: &str, id: &str, reason: &str) -> BusResult<Message>;
 
+    /// Revive this agent's Dead letters whose death was an auth failure
+    /// (401/403/Unauthorized) — the credential has been fixed. Non-auth
+    /// dead letters (genuine poison) stay dead. Returns revived letters.
+    async fn revive_auth_dead(&self, agent: &str) -> BusResult<Vec<crate::message::Message>>;
+
     /// Mark one delivered message as read (chatlog receipt: `read_at` set).
     async fn mark_read(&self, agent: &str, id: &str) -> BusResult<Message>;
 

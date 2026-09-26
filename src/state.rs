@@ -36,6 +36,9 @@ pub enum Event {
     Ack { note: Option<String> },
     /// The letter exhausted its attempts (or was judged dead by an operator).
     GiveUp { reason: String },
+    /// The credential problem that killed this letter was fixed (fresh push
+    /// succeeded for the same receiver): re-queue a dead-on-auth letter.
+    ReviveAuth,
 }
 
 impl Event {
@@ -50,6 +53,7 @@ impl Event {
             Event::ReadReceipt => "read_receipt",
             Event::Ack { .. } => "ack",
             Event::GiveUp { .. } => "give_up",
+            Event::ReviveAuth => "revive_auth",
         }
     }
 }
@@ -82,6 +86,7 @@ pub const TRANSITIONS: &[(S, &str, S)] = &[
     (S::Read, "ack", S::Acked),
     (S::Queued, "give_up", S::Dead),
     (S::Pushing, "give_up", S::Dead), // poison letter detected mid-push
+    (S::Dead, "revive_auth", S::Queued), // credential healed: retry the letter
 ];
 
 /// Outcome of applying an event to a letter's status.
@@ -152,6 +157,12 @@ pub fn bookkeep(event: &Event, prev_attempts: u32, now: DateTime<Utc>) -> Bookke
         },
         Event::GiveUp { reason } => Bookkeeping {
             dead_reason: Some(reason.clone()),
+            ..Default::default()
+        },
+        Event::ReviveAuth => Bookkeeping {
+            attempts: Some(0),
+            last_error: None,
+            dead_reason: None,
             ..Default::default()
         },
         _ => Bookkeeping::default(),

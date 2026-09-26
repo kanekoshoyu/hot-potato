@@ -152,7 +152,15 @@ impl BusStore for InMemoryStore {
             .iter_mut()
             .find(|m| m.id == id)
             .ok_or_else(|| BusError::NotFound(id.to_string()))?;
-        let event = if crate::state::should_give_up(m.attempts) {
+        // v1.3.2 auth-death guard: credential errors (401/403/Unauthorized) are
+        // RECOVERABLE — the owner re-registers or the token rotates. Never burn
+        // the letter to Dead for them; keep it Queued and visible in
+        // bus/diagnose until the credential heals. Only genuine poison
+        // (transport refused for non-auth reasons) exhausts into Dead.
+        let auth_err = reason.contains("401")
+            || reason.contains("403")
+            || reason.contains("Unauthorized");
+        let event = if crate::state::should_give_up(m.attempts) && !auth_err {
             crate::state::Event::GiveUp {
                 reason: reason.to_string(),
             }
@@ -170,6 +178,33 @@ impl BusStore for InMemoryStore {
             }
         });
         Ok(m.clone())
+    }
+
+    async fn revive_auth_dead(&self, agent: &str) -> BusResult<Vec<Message>> {
+        let mut inner = self.inner.write().expect("store poisoned");
+        let now = chrono::Utc::now();
+        let mut revived = Vec::new();
+        let is_auth = |m: &Message| {
+            m.dead_reason
+                .as_deref()
+                .map_or(false, |e| {
+                    e.contains("401") || e.contains("403") || e.contains("Unauthorized")
+                })
+        };
+        if let Some(box_) = inner.mailboxes.get_mut(agent) {
+            for m in box_.iter_mut() {
+                if m.status == MessageStatus::Dead && is_auth(m) {
+                    Self::apply_event(m, &crate::state::Event::ReviveAuth, now, |m| {
+                        m.status = MessageStatus::Queued;
+                        m.dead_reason = None;
+                        m.last_error = None;
+                        m.attempts = 0;
+                    });
+                    revived.push(m.clone());
+                }
+            }
+        }
+        Ok(revived)
     }
 
     async fn reclaim_stale_pushing(
