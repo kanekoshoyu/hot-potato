@@ -1447,9 +1447,35 @@ async fn dashboard() -> impl IntoResponse {
 /// GET /log?limit=N — human-readable lifecycle page (RFC-001 F2).
 /// The chatlog view: every letter on the bus, newest last, one line each.
 async fn log_page(
-    State((bus, _hub, _config, _registry, _invites, _dynamic_peers, _sessions)): State<BusState>,
+    State((bus, _hub, config, _registry, _invites, _dynamic_peers, sessions)): State<BusState>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    // /log mirrors letter contents (sender/receiver/subject). When the pool
+    // runs token-gated (#11), the log page must be equally gated — a session
+    // minted by dashboard/login also passes (dashboard operators need it).
+    if let Some(expected) = &config.bearer_token {
+        let bearer_ok = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == format!("Bearer {expected}"))
+            .unwrap_or(false);
+        let session_ok = headers
+            .get("x-dashboard-session")
+            .and_then(|v| v.to_str().ok())
+            .map(|sid| sessions.blocking_read().contains(sid))
+            .unwrap_or(false);
+        if !bearer_ok && !session_ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                String::from("unauthorized — this pool is token-gated"),
+            );
+        }
+    }
     let msgs = bus.list_all().await.unwrap_or_default();
     let limit: usize = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
     let start = msgs.len().saturating_sub(limit);
@@ -1478,6 +1504,7 @@ async fn log_page(
     ));
     axum::http::header::HeaderMap::new(); // keep type inference happy
     (
+        StatusCode::OK,
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
